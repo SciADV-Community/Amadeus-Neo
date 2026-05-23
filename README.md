@@ -1,1 +1,1 @@
-# Amadeus-Neo
+# Amadeus-Neo - BtG Discord Bot

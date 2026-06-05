@@ -1,9 +1,6 @@
 services:
   amadeus:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: ghcr.io/sciadv-community/amadeus-neo:latest
     container_name: amadeus-neo
     init: true
     stop_grace_period: 30s
@@ -16,8 +13,22 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
 
-    env_file:
-      - .env
+    environment:
+      DISCORD_TOKEN: "replace-me"
+      AMADEUS_OWNER_ID: ""
+      AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
+      AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
+      AMADEUS_MIN_ACCOUNT_AGE_DAYS: "14"
+      AMADEUS_MAX_FAILED_ATTEMPTS: "3"
+      AMADEUS_CAPTCHA_LENGTH: "6"
+      AMADEUS_CAPTCHA_EXPIRY_MINUTES: "10"
+      AMADEUS_BACKFILL_DELAY_SECONDS: "1.5"
+      AMADEUS_VERIFICATION_ROLE_DELAY_SECONDS: "5"
+      AMADEUS_BACKFILL_INCLUDE_BOTS_BY_DEFAULT: "false"
+      AMADEUS_LOG_LEVEL: "INFO"
+      AMADEUS_DISCORD_LOG_LEVEL: "WARNING"
+      AMADEUS_DEBUG: "false"
+      AMADEUS_DEBUG_SERVER_ID: ""
 
     volumes:
       - type: bind

@@ -74,8 +74,19 @@ def test_docker_compose_limits_writes_and_privileges(path):
     assert "target: /app/data" in content
 
 
-def test_ghcr_compose_uses_published_image_instead_of_local_build():
-    content = GHCR_COMPOSE_FILE.read_text(encoding="utf-8")
+@pytest.mark.parametrize("path", [COMPOSE_FILE, GHCR_COMPOSE_FILE])
+def test_docker_compose_uses_latest_published_image_instead_of_local_build(path):
+    content = path.read_text(encoding="utf-8")
 
-    assert "image: ghcr.io/OWNER/REPOSITORY:latest" in content
+    assert "image: ghcr.io/sciadv-community/amadeus-neo:latest" in content
     assert "build:" not in content
+
+
+@pytest.mark.parametrize("path", [COMPOSE_FILE, GHCR_COMPOSE_FILE])
+def test_docker_compose_uses_inline_environment_instead_of_env_file(path):
+    content = path.read_text(encoding="utf-8")
+
+    assert "env_file:" not in content
+    assert "    environment:" in content
+    assert '      DISCORD_TOKEN: "replace-me"' in content
+    assert '      AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"' in content

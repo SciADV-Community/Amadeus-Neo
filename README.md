@@ -82,7 +82,25 @@ The test suite is offline. It does not require a Discord token, a `.env` file, o
 
 ## Docker Deployment
 
-The Docker setup runs the bot with a read-only container filesystem and a single writable bind mount for SQLite data.
+The Docker setup pulls the latest published image from GitHub Container Registry and runs the bot with a read-only container filesystem plus one writable bind mount for SQLite data.
+
+Edit `docker-compose.yml` and set the service `environment:` values:
+
+```yaml
+environment:
+  DISCORD_TOKEN: "your-bot-token"
+  AMADEUS_OWNER_ID: "your-discord-user-id"
+  AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
+  AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
+```
+
+`AMADEUS_COGS` controls which optional modules are loaded. Leave it blank to load no optional modules.
+
+The compose file uses:
+
+```yaml
+image: ghcr.io/sciadv-community/amadeus-neo:latest
+```
 
 Before starting the container, create the data directory and make it writable by the container user:
 
@@ -91,10 +109,17 @@ mkdir -p data
 sudo chown -R 10001:10001 data
 ```
 
-The compose file maps `./data` to `/app/data`, and `.env.example` sets:
+Pull and start the bot:
 
 ```bash
-AMADEUS_DB_PATH=/app/data/amadeus.sqlite3
+docker compose pull
+docker compose up -d
+```
+
+If the package is private, log in on the server first with a GitHub token that has package read access:
+
+```bash
+docker login ghcr.io
 ```
 
 Runtime hardening currently enabled:
@@ -105,12 +130,6 @@ Runtime hardening currently enabled:
 - `/tmp` is a small `tmpfs` mounted with `noexec`, `nosuid`, and `nodev`.
 - All Linux capabilities are dropped.
 - `no-new-privileges` is enabled.
-
-Start the bot:
-
-```bash
-docker compose up -d --build
-```
 
 ---
 

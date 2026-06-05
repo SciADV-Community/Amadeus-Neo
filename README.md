@@ -125,17 +125,6 @@ If the package is private, log in on the server first with a GitHub token that h
 docker login ghcr.io
 ```
 
-Runtime hardening currently enabled:
-
-- Container runs as unprivileged UID/GID `10001`.
-- Root filesystem is read-only.
-- Only `/app/data` is writable inside the container, backed by `/srv/amadeus-neo/data` on the host.
-- `/tmp` is a small `tmpfs` mounted with `noexec`, `nosuid`, and `nodev`.
-- All Linux capabilities are dropped.
-- `no-new-privileges` is enabled.
-
-If startup fails with `sqlite3.OperationalError: unable to open database file`, re-run the `sudo install -d ... /srv/amadeus-neo/data` command above on the host. The container runs as UID/GID `10001`, and Docker-created bind directories may be root-owned if the host path did not already exist.
-
 ---
 
 ## Tests

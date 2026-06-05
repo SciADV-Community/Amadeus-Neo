@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import discord
 
@@ -15,7 +16,7 @@ class BaseStore:
     """
 
     def __init__(self):
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_database_path_ready(DB_PATH)
         self.db = sqlite3.connect(DB_PATH, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -26,6 +27,46 @@ class BaseStore:
 
     def close(self):
         self.db.close()
+
+
+def _ensure_database_path_ready(db_path: Path) -> None:
+    """
+    Validate that SQLite can create its database, WAL, and journal files.
+
+    Docker runs with a read-only root filesystem, so the database must live in
+    the writable /app/data bind mount.
+    """
+    parent = db_path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(_database_path_error(db_path)) from e
+
+    if not parent.is_dir():
+        raise RuntimeError(_database_path_error(db_path))
+
+    probe = parent / ".amadeus-write-test"
+    try:
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as e:
+        raise RuntimeError(_database_path_error(db_path)) from e
+
+    if db_path.exists():
+        try:
+            with db_path.open("ab"):
+                pass
+        except OSError as e:
+            raise RuntimeError(_database_path_error(db_path)) from e
+
+
+def _database_path_error(db_path: Path) -> str:
+    return (
+        f"SQLite database path is not writable: {db_path}\n\n"
+        "For Docker deployments, /app/data must be backed by a writable host directory.\n"
+        "Run this on the host before starting the container:\n"
+        "  sudo install -d -m 0770 -o 10001 -g 10001 /srv/amadeus-neo/data"
+    )
 
 
 class ConfigStore(BaseStore):

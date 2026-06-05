@@ -66,14 +66,14 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt -r requirements-dev.txt
-pytest
+python -m pytest
 ```
 
 If you already have a virtual environment active, only run:
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
-pytest
+python -m pytest
 ```
 
 The test suite is offline. It does not require a Discord token, a `.env` file, or a live Discord server.

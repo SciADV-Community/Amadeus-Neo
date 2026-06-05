@@ -80,6 +80,40 @@ The test suite is offline. It does not require a Discord token, a `.env` file, o
 
 ---
 
+## Docker Deployment
+
+The Docker setup runs the bot with a read-only container filesystem and a single writable bind mount for SQLite data.
+
+Before starting the container, create the data directory and make it writable by the container user:
+
+```bash
+mkdir -p data
+sudo chown -R 10001:10001 data
+```
+
+The compose file maps `./data` to `/app/data`, and `.env.example` sets:
+
+```bash
+AMADEUS_DB_PATH=/app/data/amadeus.sqlite3
+```
+
+Runtime hardening currently enabled:
+
+- Container runs as unprivileged UID/GID `10001`.
+- Root filesystem is read-only.
+- Only `/app/data` is writable for the SQLite database and its WAL/journal files.
+- `/tmp` is a small `tmpfs` mounted with `noexec`, `nosuid`, and `nodev`.
+- All Linux capabilities are dropped.
+- `no-new-privileges` is enabled.
+
+Start the bot:
+
+```bash
+docker compose up -d --build
+```
+
+---
+
 ## AI Notice
 The creation of this bot leveraged both LLM as a validation layer for human-written code. They assisted in
 - Scanning for security vulnerabilities

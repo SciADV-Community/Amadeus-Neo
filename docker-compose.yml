@@ -7,12 +7,23 @@ services:
     container_name: amadeus-neo
     init: true
     stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
 
     env_file:
       - .env
 
     volumes:
-      - ./data:/app/data
+      - type: bind
+        source: ./data
+        target: /app/data
+        read_only: false
 
     logging:
       driver: json-file

@@ -74,7 +74,7 @@ def test_docker_compose_limits_writes_and_privileges(path):
     for line in expected_lines:
         assert line in content
 
-    assert "source: ./data" in content
+    assert "source: /srv/amadeus-neo/data" in content
     assert "target: /app/data" in content
 
 

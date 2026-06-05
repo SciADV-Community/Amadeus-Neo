@@ -32,7 +32,7 @@ services:
 
     volumes:
       - type: bind
-        source: ./data
+        source: /srv/amadeus-neo/data
         target: /app/data
         read_only: false
 

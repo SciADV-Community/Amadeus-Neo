@@ -9,9 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
 COMPOSE_FILE = ROOT / "docker-compose.yml"
 GHCR_COMPOSE_FILE = ROOT / "docs" / "docker-compose.ghcr.yml"
+DOCKER_PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "docker-publish.yml"
 
 
-@pytest.mark.parametrize("path", [DOCKERFILE, COMPOSE_FILE, GHCR_COMPOSE_FILE])
+@pytest.mark.parametrize(
+    "path",
+    [DOCKERFILE, COMPOSE_FILE, GHCR_COMPOSE_FILE, DOCKER_PUBLISH_WORKFLOW],
+)
 def test_container_config_files_have_clean_line_formatting(path):
     content = path.read_text(encoding="utf-8")
 
@@ -90,3 +94,13 @@ def test_docker_compose_uses_inline_environment_instead_of_env_file(path):
     assert "    environment:" in content
     assert '      DISCORD_TOKEN: "replace-me"' in content
     assert '      AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"' in content
+
+
+def test_docker_publish_workflow_build_depends_on_unit_tests():
+    content = DOCKER_PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "  unit-tests:" in content
+    assert "      - name: Run tests" in content
+    assert "        run: python -m pytest" in content
+    assert "  build:" in content
+    assert "    needs: unit-tests" in content

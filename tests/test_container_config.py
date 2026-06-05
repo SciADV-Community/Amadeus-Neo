@@ -8,9 +8,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
 COMPOSE_FILE = ROOT / "docker-compose.yml"
+GHCR_COMPOSE_FILE = ROOT / "docs" / "docker-compose.ghcr.yml"
 
 
-@pytest.mark.parametrize("path", [DOCKERFILE, COMPOSE_FILE])
+@pytest.mark.parametrize("path", [DOCKERFILE, COMPOSE_FILE, GHCR_COMPOSE_FILE])
 def test_container_config_files_have_clean_line_formatting(path):
     content = path.read_text(encoding="utf-8")
 
@@ -49,8 +50,9 @@ def test_dockerfile_runs_as_unprivileged_user_with_readonly_runtime_support():
     assert 'CMD ["python", "main.py"]' in content
 
 
-def test_docker_compose_limits_writes_and_privileges():
-    content = COMPOSE_FILE.read_text(encoding="utf-8")
+@pytest.mark.parametrize("path", [COMPOSE_FILE, GHCR_COMPOSE_FILE])
+def test_docker_compose_limits_writes_and_privileges(path):
+    content = path.read_text(encoding="utf-8")
 
     expected_lines = [
         '    user: "10001:10001"',
@@ -70,3 +72,10 @@ def test_docker_compose_limits_writes_and_privileges():
 
     assert "source: ./data" in content
     assert "target: /app/data" in content
+
+
+def test_ghcr_compose_uses_published_image_instead_of_local_build():
+    content = GHCR_COMPOSE_FILE.read_text(encoding="utf-8")
+
+    assert "image: ghcr.io/OWNER/REPOSITORY:latest" in content
+    assert "build:" not in content

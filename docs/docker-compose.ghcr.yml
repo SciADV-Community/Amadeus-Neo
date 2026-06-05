@@ -1,0 +1,32 @@
+services:
+  amadeus:
+    image: ghcr.io/OWNER/REPOSITORY:latest
+    container_name: amadeus-neo
+    init: true
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+    env_file:
+      - path: .env
+        required: false
+
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+        read_only: false
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    restart: unless-stopped

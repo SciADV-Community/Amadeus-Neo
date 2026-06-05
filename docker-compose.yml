@@ -1,0 +1,23 @@
+services:
+  amadeus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: amadeus-neo
+    init: true
+    stop_grace_period: 30s
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./data:/app/data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    restart: unless-stopped

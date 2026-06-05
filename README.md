@@ -105,8 +105,7 @@ image: ghcr.io/sciadv-community/amadeus-neo:latest
 Before starting the container, create the data directory and make it writable by the container user:
 
 ```bash
-sudo mkdir -p /srv/amadeus-neo/data
-sudo chown -R 10001:10001 /srv/amadeus-neo/data
+sudo install -d -m 0770 -o 10001 -g 10001 /srv/amadeus-neo/data
 ```
 
 The compose file maps `/srv/amadeus-neo/data` on the host to `/app/data` in the container. SQLite stores `amadeus.sqlite3` and its WAL/journal files there.
@@ -132,6 +131,8 @@ Runtime hardening currently enabled:
 - `/tmp` is a small `tmpfs` mounted with `noexec`, `nosuid`, and `nodev`.
 - All Linux capabilities are dropped.
 - `no-new-privileges` is enabled.
+
+If startup fails with `sqlite3.OperationalError: unable to open database file`, re-run the `sudo install -d ... /srv/amadeus-neo/data` command above on the host. The container runs as UID/GID `10001`, and Docker-created bind directories may be root-owned if the host path did not already exist.
 
 ---
 

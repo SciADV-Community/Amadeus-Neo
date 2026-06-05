@@ -27,6 +27,33 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 
 ---
 
+## Bot Invite
+
+Create the bot application in the Discord Developer Portal, then replace `YOUR_CLIENT_ID` in this URL:
+
+```text
+https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1103001349142&scope=bot%20applications.commands
+```
+
+This invite includes the baseline permissions needed for all current modules:
+
+- View Channels
+- Send Messages
+- Embed Links
+- Attach Files
+- Use Application Commands
+- Manage Roles
+- Manage Emojis and Stickers
+- Manage Channels
+- Manage Messages
+- Moderate Members
+- Kick Members
+- Ban Members
+
+You can remove permissions from the invite if you do not plan to enable the modules that use them.
+
+---
+
 ## Required Permissions
 
 ### Bot (all servers)
@@ -52,31 +79,6 @@ See each module's documentation for its specific permission requirements.
 | Intent | Reason |
 |---|---|
 | Server Members | Required for `/bouncer verify-all` (iterating all guild members) and guild join events |
-
----
-
-## Tests
-
-Unit tests run automatically in GitHub Actions on every push and pull request.
-
-To run the same test suite locally:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest
-```
-
-If you already have a virtual environment active, only run:
-
-```bash
-pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest
-```
-
-The test suite is offline. It does not require a Discord token, a `.env` file, or a live Discord server.
 
 ---
 
@@ -133,6 +135,31 @@ Runtime hardening currently enabled:
 - `no-new-privileges` is enabled.
 
 If startup fails with `sqlite3.OperationalError: unable to open database file`, re-run the `sudo install -d ... /srv/amadeus-neo/data` command above on the host. The container runs as UID/GID `10001`, and Docker-created bind directories may be root-owned if the host path did not already exist.
+
+---
+
+## Tests
+
+Unit tests run automatically in GitHub Actions on every push and pull request.
+
+To run the same test suite locally:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+If you already have a virtual environment active, only run:
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+The test suite is offline. It does not require a Discord token, a `.env` file, or a live Discord server.
 
 ---
 

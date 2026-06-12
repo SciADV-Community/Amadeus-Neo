@@ -6,7 +6,23 @@ on:
       - main
     tags:
       - "v*.*.*"
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/docker-publish.yml"
+      - "Dockerfile"
+      - "amadeus/**"
+      - "cogs/**"
+      - "main.py"
+      - "requirements.txt"
   pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/docker-publish.yml"
+      - "Dockerfile"
+      - "amadeus/**"
+      - "cogs/**"
+      - "main.py"
+      - "requirements.txt"
   workflow_dispatch:
 
 permissions:

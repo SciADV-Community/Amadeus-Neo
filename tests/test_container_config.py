@@ -104,3 +104,17 @@ def test_docker_publish_workflow_build_depends_on_unit_tests():
     assert "        run: python -m pytest" in content
     assert "  build:" in content
     assert "    needs: unit-tests" in content
+
+
+def test_docker_publish_workflow_ignores_docs_and_tests_only_changes():
+    content = DOCKER_PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "    paths:" in content
+    assert '      - "amadeus/**"' in content
+    assert '      - "cogs/**"' in content
+    assert '      - "main.py"' in content
+    assert '      - "requirements.txt"' in content
+    assert '      - "Dockerfile"' in content
+    assert '      - "docs/**"' not in content
+    assert '      - "tests/**"' not in content
+    assert '      - "CHANGELOG.md"' not in content

@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 
 from amadeus.alerts import send_alert
+from amadeus.constants import OWNER_ID
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import escape_untrusted_text
 from amadeus.honeypot_config import HoneypotConfigStore
@@ -12,6 +13,22 @@ from amadeus.moderation import action_display, execute_action
 # ============================================================
 # Honeypot cog
 # ============================================================
+
+def honeypot_action_exemption_reason(
+    member: discord.Member,
+    action: str | None,
+    admin_role_id: int | None,
+    *,
+    owner_id: int | None,
+) -> str | None:
+    if admin_role_id is not None and any(role.id == admin_role_id for role in member.roles):
+        return "Skipped — member has the configured Amadeus admin role."
+
+    if action == "ban" and owner_id is not None and member.id == owner_id:
+        return "Skipped — configured Amadeus owner cannot be banned."
+
+    return None
+
 
 class Honeypot(commands.Cog):
     """
@@ -91,13 +108,31 @@ class Honeypot(commands.Cog):
         if not isinstance(member, discord.Member):
             return
 
-        result = await execute_action(
-            message.guild,
+        admin_role_id = None
+        try:
+            guild_config = self.module_store.get_guild_config(guild_id)
+            admin_role_id = guild_config.admin_role_id
+        except RuntimeError:
+            log(
+                f"HONEYPOT // GUILD CONFIG MISSING 『 GUILD {guild_id} 』",
+                level="debug",
+                logger_name="honeypot",
+            )
+
+        result = honeypot_action_exemption_reason(
             member,
             config.action,
-            config.action_role_id,
-            config.action_reason,
+            admin_role_id,
+            owner_id=OWNER_ID,
         )
+        if result is None:
+            result = await execute_action(
+                message.guild,
+                member,
+                config.action,
+                config.action_role_id,
+                config.action_reason,
+            )
 
         if config.alerts_enabled:
             content_preview = (

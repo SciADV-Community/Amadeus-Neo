@@ -18,6 +18,8 @@ Trap channel for catching bots and compromised accounts. Any message posted in t
 
 > For the remove-role action, the bot role must sit **above** the target role in the server's role hierarchy.
 
+> Members with the configured Amadeus admin role are exempt from honeypot moderation actions. The `AMADEUS_OWNER_ID` user is also protected from honeypot bans.
+
 > The bot's own messages in the honeypot channel are not deleted — this allows `/honeypot post` to display the warning embed.
 
 ## Configurable Settings

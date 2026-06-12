@@ -3,24 +3,29 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import cogs.honeypot as honeypot_module
-from cogs.honeypot import Honeypot
+from cogs.honeypot import Honeypot, honeypot_action_exemption_reason
 
 
 class FakeMember:
-    def __init__(self, member_id=2):
+    def __init__(self, member_id=2, roles=None):
         self.id = member_id
         self.mention = f"<@{member_id}>"
+        self.roles = roles or []
 
     def __str__(self):
         return f"member-{self.id}"
 
 
 class FakeModuleStore:
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, guild_config=None):
         self.enabled = enabled
+        self.guild_config = guild_config or SimpleNamespace(admin_role_id=None)
 
     def is_module_enabled(self, guild_id, module_name):
         return self.enabled
+
+    def get_guild_config(self, guild_id):
+        return self.guild_config
 
 
 class FakeHoneypotStore:
@@ -31,10 +36,10 @@ class FakeHoneypotStore:
         return self.config
 
 
-def make_cog(config=None, *, enabled=True):
+def make_cog(config=None, *, enabled=True, guild_config=None):
     cog = Honeypot.__new__(Honeypot)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
-    cog.module_store = FakeModuleStore(enabled=enabled)
+    cog.module_store = FakeModuleStore(enabled=enabled, guild_config=guild_config)
     cog.honeypot_store = FakeHoneypotStore(config)
     return cog
 
@@ -48,6 +53,26 @@ def make_message(*, guild_id=1, channel_id=10, author=None, content="trap"):
         content=content,
         delete=AsyncMock(),
     )
+
+
+def test_honeypot_action_exemption_reason_skips_configured_admin_role():
+    admin_role = SimpleNamespace(id=10)
+    member = FakeMember(2, roles=[admin_role])
+
+    assert (
+        honeypot_action_exemption_reason(member, "kick", admin_role_id=10, owner_id=None)
+        == "Skipped — member has the configured Amadeus admin role."
+    )
+
+
+def test_honeypot_action_exemption_reason_only_blocks_env_owner_bans():
+    member = FakeMember(2)
+
+    assert (
+        honeypot_action_exemption_reason(member, "ban", admin_role_id=None, owner_id=2)
+        == "Skipped — configured Amadeus owner cannot be banned."
+    )
+    assert honeypot_action_exemption_reason(member, "kick", admin_role_id=None, owner_id=2) is None
 
 
 def test_honeypot_ignores_dm_messages():
@@ -127,6 +152,50 @@ def test_honeypot_deletes_message_before_action_and_passes_reason(monkeypatch):
     asyncio.run(cog.on_message(message))
 
     assert events == ["delete", "action"]
+
+
+def test_honeypot_skips_action_for_configured_admin_role(monkeypatch):
+    monkeypatch.setattr(honeypot_module.discord, "Member", FakeMember)
+    execute_action = AsyncMock()
+    monkeypatch.setattr(honeypot_module, "execute_action", execute_action)
+    monkeypatch.setattr(honeypot_module, "send_alert", AsyncMock())
+    config = SimpleNamespace(
+        channel_id=10,
+        action="kick",
+        action_role_id=None,
+        action_reason=None,
+        alerts_enabled=False,
+    )
+    admin_role = SimpleNamespace(id=10)
+    cog = make_cog(config, guild_config=SimpleNamespace(admin_role_id=10))
+    message = make_message(author=FakeMember(2, roles=[admin_role]))
+
+    asyncio.run(cog.on_message(message))
+
+    message.delete.assert_awaited_once()
+    execute_action.assert_not_awaited()
+
+
+def test_honeypot_skips_ban_for_configured_env_owner(monkeypatch):
+    monkeypatch.setattr(honeypot_module.discord, "Member", FakeMember)
+    monkeypatch.setattr(honeypot_module, "OWNER_ID", 2)
+    execute_action = AsyncMock()
+    monkeypatch.setattr(honeypot_module, "execute_action", execute_action)
+    monkeypatch.setattr(honeypot_module, "send_alert", AsyncMock())
+    config = SimpleNamespace(
+        channel_id=10,
+        action="ban",
+        action_role_id=None,
+        action_reason=None,
+        alerts_enabled=False,
+    )
+    cog = make_cog(config)
+    message = make_message(author=FakeMember(2))
+
+    asyncio.run(cog.on_message(message))
+
+    message.delete.assert_awaited_once()
+    execute_action.assert_not_awaited()
 
 
 def test_honeypot_sends_alert_when_enabled(monkeypatch):

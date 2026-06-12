@@ -3,6 +3,8 @@
 ---
 ### v1.2.0
 - `/honeypot enable-alerts` will no longer warn you to set a channel if one is already set.
+- Honeypot moderation actions no longer apply to members with the configured Amadeus admin role.
+- Honeypot bans now skip the configured `AMADEUS_OWNER_ID` user.
 
 ### v1.1.1
 - Added additional unit tests for multiple modules.
@@ -12,4 +14,3 @@
 
 ### v1.0.1
 - Resolved honeypot race condition
-

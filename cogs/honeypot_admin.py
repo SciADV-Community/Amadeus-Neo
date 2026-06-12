@@ -27,6 +27,12 @@ def honeypot_action_label(action: str, role: discord.Role | None = None) -> str:
     return labels[action]
 
 
+def honeypot_alerts_hint(enabled: bool, alert_channel_id: int | None) -> str:
+    if enabled and alert_channel_id is None:
+        return "\n\nMake sure `/amadeus set-admin-channel` is configured so alerts have somewhere to go."
+    return ""
+
+
 # ============================================================
 # HoneypotAdmin cog
 # ============================================================
@@ -200,11 +206,7 @@ class HoneypotAdmin(commands.Cog):
         )
 
         state = "enabled" if enabled else "disabled"
-        hint = (
-            "\n\nMake sure `/amadeus set-admin-channel` is configured so alerts have somewhere to go."
-            if enabled
-            else ""
-        )
+        hint = honeypot_alerts_hint(enabled, config.alert_channel_id)
 
         await interaction.response.send_message(
             f"Honeypot alerts **{state}**.{hint}",

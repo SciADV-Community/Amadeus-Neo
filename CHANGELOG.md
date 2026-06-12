@@ -1,6 +1,8 @@
 # Changelog
 
 ---
+### v1.1.2
+- `/honeypot enable-alerts` will no longer warn you to set a channel if one is already set.
 
 ### v1.1.1
 - Added additional unit tests for multiple modules.

@@ -2,7 +2,25 @@ name: Tests
 
 on:
   push:
+    paths:
+      - ".github/workflows/tests.yml"
+      - "amadeus/**"
+      - "cogs/**"
+      - "main.py"
+      - "pytest.ini"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "tests/**"
   pull_request:
+    paths:
+      - ".github/workflows/tests.yml"
+      - "amadeus/**"
+      - "cogs/**"
+      - "main.py"
+      - "pytest.ini"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "tests/**"
 
 jobs:
   unit-tests:

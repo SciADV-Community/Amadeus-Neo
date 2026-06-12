@@ -10,11 +10,12 @@ DOCKERFILE = ROOT / "Dockerfile"
 COMPOSE_FILE = ROOT / "docker-compose.yml"
 GHCR_COMPOSE_FILE = ROOT / "docs" / "docker-compose.ghcr.yml"
 DOCKER_PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "docker-publish.yml"
+TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 
 
 @pytest.mark.parametrize(
     "path",
-    [DOCKERFILE, COMPOSE_FILE, GHCR_COMPOSE_FILE, DOCKER_PUBLISH_WORKFLOW],
+    [DOCKERFILE, COMPOSE_FILE, GHCR_COMPOSE_FILE, DOCKER_PUBLISH_WORKFLOW, TESTS_WORKFLOW],
 )
 def test_container_config_files_have_clean_line_formatting(path):
     content = path.read_text(encoding="utf-8")
@@ -117,4 +118,19 @@ def test_docker_publish_workflow_ignores_docs_and_tests_only_changes():
     assert '      - "Dockerfile"' in content
     assert '      - "docs/**"' not in content
     assert '      - "tests/**"' not in content
+    assert '      - "CHANGELOG.md"' not in content
+
+
+def test_tests_workflow_ignores_docs_and_changelog_only_changes():
+    content = TESTS_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "    paths:" in content
+    assert '      - "amadeus/**"' in content
+    assert '      - "cogs/**"' in content
+    assert '      - "main.py"' in content
+    assert '      - "pytest.ini"' in content
+    assert '      - "requirements.txt"' in content
+    assert '      - "requirements-dev.txt"' in content
+    assert '      - "tests/**"' in content
+    assert '      - "docs/**"' not in content
     assert '      - "CHANGELOG.md"' not in content

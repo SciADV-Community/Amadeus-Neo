@@ -11,6 +11,22 @@ from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
 
 
+def honeypot_action_label(action: str, role: discord.Role | None = None) -> str:
+    """Returns a display label for configured honeypot actions."""
+    if action == "remove_role":
+        if role is None:
+            raise ValueError("remove_role requires a role")
+        return f"Remove role ({role.mention})"
+
+    labels = {
+        "mute": "Mute (28-day timeout)",
+        "kick": "Kick",
+        "ban": "Ban",
+    }
+
+    return labels[action]
+
+
 # ============================================================
 # HoneypotAdmin cog
 # ============================================================
@@ -152,15 +168,8 @@ class HoneypotAdmin(commands.Cog):
             logger_name="honeypot",
         )
 
-        labels = {
-            "remove_role": f"Remove role ({role.mention})",
-            "mute": "Mute (28-day timeout)",
-            "kick": "Kick",
-            "ban": "Ban",
-        }
-
         await interaction.response.send_message(
-            f"Honeypot action set to **{labels[action]}**.",
+            f"Honeypot action set to **{honeypot_action_label(action, role)}**.",
             ephemeral=True,
         )
 

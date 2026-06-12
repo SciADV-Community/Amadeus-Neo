@@ -12,7 +12,7 @@ Trap channel for catching bots and compromised accounts. Any message posted in t
 ## Setup
 
 1. `/honeypot set-channel <channel>` — designates the trap channel. The bot checks for **Manage Messages** and **Manage Channel** permissions and reports any that are missing. A 1-minute slow-mode is applied automatically if permissions allow.
-2. `/honeypot set-action <action> [role]` — choose what happens when someone posts.
+2. `/honeypot set-action <action> [role] [reason]` — choose what happens when someone posts. `reason` is written to the audit log for `mute`, `kick`, and `ban`.
 3. `/honeypot enable-alerts <true|false>` — enable alerts to the admin channel (requires `/amadeus set-admin-channel` to be configured).
 4. `/honeypot post` — posts a visible warning embed in the honeypot channel.
 
@@ -25,7 +25,7 @@ Trap channel for catching bots and compromised accounts. Any message posted in t
 | Command | Options | Description |
 |---|---|---|
 | `/honeypot set-channel` | Any text channel | The channel that triggers the action |
-| `/honeypot set-action` | `remove-role`, `mute`, `kick`, `ban` | Action taken on the sender |
+| `/honeypot set-action` | `remove-role`, `mute`, `kick`, `ban`; optional `reason` for `mute`/`kick`/`ban` | Action taken on the sender |
 | `/honeypot enable-alerts` | `true` / `false` | Whether to alert the admin channel on each trigger |
 
 **Actions:**
@@ -41,7 +41,7 @@ Trap channel for catching bots and compromised accounts. Any message posted in t
 
 | Table | Stores |
 |---|---|
-| `honeypot_config` | Per-guild trap channel, configured action, and alert setting |
+| `honeypot_config` | Per-guild trap channel, configured action, action reason, and alert setting |
 
 ## Troubleshooting
 

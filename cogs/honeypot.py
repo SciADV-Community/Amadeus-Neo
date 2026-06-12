@@ -91,7 +91,13 @@ class Honeypot(commands.Cog):
         if not isinstance(member, discord.Member):
             return
 
-        result = await execute_action(message.guild, member, config.action, config.action_role_id)
+        result = await execute_action(
+            message.guild,
+            member,
+            config.action,
+            config.action_role_id,
+            config.action_reason,
+        )
 
         if config.alerts_enabled:
             content_preview = (

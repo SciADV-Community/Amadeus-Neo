@@ -124,6 +124,7 @@ class HoneypotAdmin(commands.Cog):
     @app_commands.describe(
         action="The moderation action to take.",
         role="Role to remove — only required for the remove-role action.",
+        reason="Audit log reason for mute, kick, or ban.",
     )
     @app_commands.choices(action=[
         app_commands.Choice(name="Remove role", value="remove_role"),
@@ -136,6 +137,7 @@ class HoneypotAdmin(commands.Cog):
         interaction: discord.Interaction,
         action: str,
         role: discord.Role | None = None,
+        reason: app_commands.Range[str, 1, 512] | None = None,
     ):
         config = await require_amadeus_access(interaction, self.module_store)
 
@@ -161,6 +163,7 @@ class HoneypotAdmin(commands.Cog):
             interaction.guild.id,
             action,
             role.id if role else None,
+            reason if action in {"mute", "kick", "ban"} else None,
         )
         log(
             f"HONEYPOT // ACTION SET 『 {action} 』 ROLE 『 {role.id if role else None} 』 GUILD 『 {interaction.guild.id} 』",
@@ -168,8 +171,9 @@ class HoneypotAdmin(commands.Cog):
             logger_name="honeypot",
         )
 
+        reason_note = f"\nAudit log reason: `{reason}`" if action in {"mute", "kick", "ban"} and reason else ""
         await interaction.response.send_message(
-            f"Honeypot action set to **{honeypot_action_label(action, role)}**.",
+            f"Honeypot action set to **{honeypot_action_label(action, role)}**.{reason_note}",
             ephemeral=True,
         )
 

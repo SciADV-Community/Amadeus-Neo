@@ -110,8 +110,11 @@ def test_activity_store_tracks_cooldown_channels_tiers_and_counts(temp_db_path):
     store = ActivityStore()
     try:
         assert store.get_cooldown(1) == 5
+        assert store.get_role_swap_enabled(1) is False
         store.set_cooldown(1, 12)
+        store.set_role_swap_enabled(1, True)
         assert store.get_cooldown(1) == 12
+        assert store.get_role_swap_enabled(1) is True
 
         store.add_channel(1, 100, "include")
         store.add_channel(1, 200, "exclude")
@@ -131,7 +134,9 @@ def test_activity_store_tracks_cooldown_channels_tiers_and_counts(temp_db_path):
         assert store.get_count(1, 2) == 0
         assert store.increment_count(1, 2) == 1
         assert store.increment_count(1, 2) == 2
+        assert store.increment_count(1, 3) == 1
         assert store.get_count(1, 2) == 2
+        assert store.get_leaderboard(1, limit=2) == [(2, 2), (3, 1)]
     finally:
         store.close()
 

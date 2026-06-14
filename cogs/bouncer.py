@@ -132,6 +132,48 @@ class Bouncer(commands.Cog):
     def account_is_old_enough(self, member: discord.Member, min_days: int) -> bool:
         return self.account_age_days(member) >= min_days
 
+    async def send_captcha_challenge(
+        self,
+        interaction: discord.Interaction,
+        captcha_text: str,
+        max_attempts: int,
+        *,
+        attempts_used: int = 0,
+        existing: bool = False,
+    ) -> None:
+        captcha_file = await self.captcha.make_captcha_file(captcha_text)
+        description = (
+            "You already have an active CAPTCHA.\n\n"
+            if existing
+            else ""
+        )
+        attempts_line = (
+            f"Attempts used: **{attempts_used}/{max_attempts}**\n"
+            f"Attempts left: **{max_attempts - attempts_used}**"
+            if existing
+            else f"You have **{max_attempts} attempts**."
+        )
+
+        embed = discord.Embed(
+            title="Verification CAPTCHA",
+            description=(
+                f"{description}"
+                "Type the code shown in the image using:\n\n"
+                "`/code <code>`\n\n"
+                "The code is not case-sensitive.\n"
+                f"{attempts_line}"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Only you can see this message.")
+        embed.set_image(url="attachment://captcha.png")
+
+        await interaction.response.send_message(
+            embed=embed,
+            file=captcha_file,
+            ephemeral=True,
+        )
+
     def get_verified_role(
         self, guild: discord.Guild, config: BounceConfig
     ) -> discord.Role | None:
@@ -276,42 +318,24 @@ class Bouncer(commands.Cog):
                 self.clear_challenge(interaction.guild.id, member.id)
             else:
                 log(f"BOUNCER // ACTIVE CHALLENGE 『 {member.id} 』 ATTEMPTS {existing.attempts}/{eff_max_attempts}", level="debug", logger_name="bouncer")
-                attempts_left = eff_max_attempts - existing.attempts
-                await interaction.response.send_message(
-                    (
-                        "You already have an active CAPTCHA.\n\n"
-                        "Submit the code from your existing image using:\n\n"
-                        "`/code <code>`\n\n"
-                        f"Attempts used: **{existing.attempts}/{eff_max_attempts}**\n"
-                        f"Attempts left: **{attempts_left}**"
-                    ),
-                    ephemeral=True,
+                await self.send_captcha_challenge(
+                    interaction,
+                    existing.answer,
+                    eff_max_attempts,
+                    attempts_used=existing.attempts,
+                    existing=True,
                 )
                 return
 
         captcha_text = self.captcha.make_captcha_text()
-        captcha_file = await self.captcha.make_captcha_file(captcha_text)
 
         self.active_challenges[key] = CaptchaChallenge(answer=captcha_text)
         log(f"BOUNCER // CAPTCHA ISSUED 『 {member.id} 』 GUILD {interaction.guild.id}", level="debug", logger_name="bouncer")
 
-        embed = discord.Embed(
-            title="Verification CAPTCHA",
-            description=(
-                "Type the code shown in the image using:\n\n"
-                "`/code <code>`\n\n"
-                "The code is not case-sensitive.\n"
-                f"You have **{eff_max_attempts} attempts**."
-            ),
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text="Only you can see this message.")
-        embed.set_image(url="attachment://captcha.png")
-
-        await interaction.response.send_message(
-            embed=embed,
-            file=captcha_file,
-            ephemeral=True,
+        await self.send_captcha_challenge(
+            interaction,
+            captcha_text,
+            eff_max_attempts,
         )
 
     async def complete_verification(

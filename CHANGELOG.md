@@ -2,6 +2,7 @@
 
 ---
 ### v1.2.0
+- Reusing the bouncer Start Verification button now resends the active CAPTCHA image instead of only asking for the code.
 - `/honeypot enable-alerts` will no longer warn you to set a channel if one is already set.
 - Honeypot moderation actions no longer apply to members with the configured Amadeus admin role.
 - Honeypot bans now skip the configured `AMADEUS_OWNER_ID` user.

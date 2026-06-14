@@ -38,6 +38,8 @@ Panel images must be uploaded to Discord. External image URLs are rejected.
 | `/verify` | Start verification in the configured verification channel |
 | `/code <code>` | Submit the CAPTCHA code shown in the user's private CAPTCHA image |
 
+If a member dismisses the private CAPTCHA message before submitting the code, pressing **Start Verification** again or running `/verify` will resend the active CAPTCHA image instead of creating a new challenge.
+
 ## Admin Commands
 
 | Command | Description |

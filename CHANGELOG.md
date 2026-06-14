@@ -2,6 +2,7 @@
 
 ---
 ### v1.2.0
+- The bouncer verification panel now includes configured Terms of Service and Privacy Policy links, plus a moderator assistance note.
 - Added optional `AMADEUS_PRIVACY_POLICY_URL` and `AMADEUS_TERMS_OF_SERVICE_URL` startup sync for the bot application's bio.
 - Reusing the bouncer Start Verification button now resends the active CAPTCHA image instead of only asking for the code.
 - `/honeypot enable-alerts` will no longer warn you to set a channel if one is already set.

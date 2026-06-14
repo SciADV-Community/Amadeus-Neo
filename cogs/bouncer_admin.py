@@ -10,6 +10,8 @@ from amadeus.constants import (
     BACKFILL_DELAY_SECONDS,
     BACKFILL_INCLUDE_BOTS_BY_DEFAULT,
     MIN_ACCOUNT_AGE_DAYS,
+    PRIVACY_POLICY_URL,
+    TERMS_OF_SERVICE_URL,
 )
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import (
@@ -40,6 +42,58 @@ class BackfillProgress:
     cancelled: bool = False
     last_member: str = "—"
     last_error: str = "—"
+
+
+def build_bouncer_panel_embed(
+    *,
+    min_account_age_days: int,
+    panel_image_url: str | None,
+    terms_of_service_url: str = TERMS_OF_SERVICE_URL,
+    privacy_policy_url: str = PRIVACY_POLICY_URL,
+) -> discord.Embed:
+    terms_of_service_url = terms_of_service_url.strip()
+    privacy_policy_url = privacy_policy_url.strip()
+
+    requirements = [
+        f"- Your Discord account must be at least **{min_account_age_days} days old**.",
+        "- You must complete a private CAPTCHA.",
+    ]
+    if terms_of_service_url:
+        requirements.append(f"- You must agree to our [Terms of Service]({terms_of_service_url}).")
+
+    description_parts = [
+        "Before you can enter the server, please verify your account.",
+        "**Requirements:**\n" + "\n".join(requirements),
+    ]
+
+    if privacy_policy_url:
+        description_parts.append(
+            f"**Privacy Policy:**\n[Click here to see our Privacy Policy]({privacy_policy_url})"
+        )
+
+    description_parts.append(
+        "**How to verify:**\n"
+        "Click **Start Verification** below or run `/verify`.\n"
+        "Then submit your CAPTCHA with `/code <code>`."
+    )
+
+    embed = discord.Embed(
+        title="Welcome — Verification Required",
+        description="\n\n".join(description_parts),
+        color=discord.Color.orange(),
+    )
+
+    if panel_image_url:
+        embed.set_image(url=panel_image_url)
+
+    embed.set_footer(
+        text=(
+            "Verification is private. Your CAPTCHA is only visible to you.\n"
+            "If you require special assistance please contact a moderator."
+        )
+    )
+
+    return embed
 
 
 # ============================================================
@@ -287,25 +341,9 @@ class BounceAdmin(commands.Cog):
         )
         eff_panel_image = bounce_config.panel_image_url
 
-        embed = discord.Embed(
-            title="Welcome — Verification Required",
-            description=(
-                "Before you can enter the server, please verify your account.\n\n"
-                "**Requirements:**\n"
-                f"- Your Discord account must be at least **{eff_min_age} days old**.\n"
-                "- You must complete a private CAPTCHA.\n\n"
-                "**How to verify:**\n"
-                "Click **Start Verification** below or run `/verify`.\n"
-                "Then submit your CAPTCHA with `/code <code>`."
-            ),
-            color=discord.Color.orange(),
-        )
-
-        if eff_panel_image:
-            embed.set_image(url=eff_panel_image)
-
-        embed.set_footer(
-            text="Verification is private. Your CAPTCHA is only visible to you."
+        embed = build_bouncer_panel_embed(
+            min_account_age_days=eff_min_age,
+            panel_image_url=eff_panel_image,
         )
 
         try:

@@ -17,6 +17,8 @@ CAPTCHA-based member verification. New members must solve a text CAPTCHA before 
 
 > The bot needs **Manage Roles** and its role must sit **above** the verified role in the server's role hierarchy.
 
+> If `AMADEUS_TERMS_OF_SERVICE_URL` or `AMADEUS_PRIVACY_POLICY_URL` are configured, `/bouncer setup post-panel` includes those links in the public verification panel.
+
 ## Configurable Settings
 
 All settings are per-server and persist across restarts.

@@ -25,31 +25,34 @@ class ActivityAdmin(commands.Cog):
         name="activity",
         description="Activity role tracking commands.",
         guild_only=True,
-        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     tier = app_commands.Group(
         name="tier",
         description="Configure activity role tiers.",
         parent=activity,
+        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     channel = app_commands.Group(
         name="channel",
         description="Configure which channels count toward activity.",
         parent=activity,
+        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     settings = app_commands.Group(
         name="settings",
         description="Tune activity tracking behavior.",
         parent=activity,
+        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     admin = app_commands.Group(
         name="admin",
         description="Inspect member activity.",
         parent=activity,
+        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     def __init__(self, bot: commands.Bot):
@@ -70,6 +73,109 @@ class ActivityAdmin(commands.Cog):
         cog = self.bot.get_cog("Activity")
         if cog is not None:
             cog.invalidate_cache(guild_id)
+
+    def _build_status_embed(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        count: int,
+        tiers: list[tuple[int, int]],
+        title_prefix: str = "Activity Status",
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"{title_prefix} — {member.display_name}",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Messages counted", value=f"**{count}**", inline=True)
+
+        current_tier = None
+        for threshold, role_id in tiers:
+            if count >= threshold:
+                current_tier = (threshold, role_id)
+            else:
+                break
+
+        if current_tier is None:
+            current_text = "No activity role yet."
+        else:
+            threshold, role_id = current_tier
+            role = guild.get_role(role_id)
+            role_text = role.mention if role else f"<deleted {role_id}>"
+            current_text = f"{role_text}\nReached at **{threshold}** messages."
+        embed.add_field(name="Current role", value=current_text, inline=False)
+
+        next_tier = next(((threshold, role_id) for threshold, role_id in tiers if count < threshold), None)
+        if next_tier is not None:
+            threshold, role_id = next_tier
+            role = guild.get_role(role_id)
+            role_text = role.mention if role else f"<deleted {role_id}>"
+            embed.add_field(
+                name="Next role",
+                value=f"**{threshold - count}** more messages for {role_text}.",
+                inline=False,
+            )
+        elif tiers:
+            embed.add_field(name="Next role", value="Top configured role reached.", inline=False)
+        else:
+            embed.add_field(name="Activity tiers", value="No tiers configured.", inline=False)
+
+        return embed
+
+    def _build_leaderboard_embed(
+        self,
+        guild: discord.Guild,
+        leaderboard: list[tuple[int, int]],
+    ) -> discord.Embed:
+        if not leaderboard:
+            description = "No activity has been counted yet."
+        else:
+            medals = ["🥇", "🥈", "🥉"]
+            lines = []
+            for index, (user_id, count) in enumerate(leaderboard, start=1):
+                member = guild.get_member(user_id)
+                name = member.mention if member else f"<@{user_id}>"
+                rank = medals[index - 1] if index <= len(medals) else f"`#{index}`"
+                lines.append(f"{rank} {name} — **{count}** messages")
+            description = "\n".join(lines)
+
+        return discord.Embed(
+            title="Activity Leaderboard",
+            description=description,
+            color=discord.Color.gold(),
+        )
+
+    # ========================================================
+    # /activity public
+    # ========================================================
+
+    @activity.command(name="status", description="Show your activity count and role progress.")
+    async def activity_status(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "Could not read your server member data.",
+                ephemeral=True,
+            )
+            return
+
+        count = self.activity_store.get_count(interaction.guild.id, interaction.user.id)
+        tiers = self.activity_store.get_tiers(interaction.guild.id)
+        embed = self._build_status_embed(interaction.guild, interaction.user, count=count, tiers=tiers)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @activity.command(name="leaderboard", description="Show the top 10 most active members.")
+    async def activity_leaderboard(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return
+
+        leaderboard = self.activity_store.get_leaderboard(interaction.guild.id, limit=10)
+        embed = self._build_leaderboard_embed(interaction.guild, leaderboard)
+
+        await interaction.response.send_message(embed=embed)
 
     # ========================================================
     # /activity tier
@@ -196,6 +302,27 @@ class ActivityAdmin(commands.Cog):
         )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @tier.command(name="role-swap", description="Only keep the member's highest earned activity role.")
+    @app_commands.describe(enabled="True removes older tier roles when a newer tier is earned.")
+    async def tier_role_swap(
+        self,
+        interaction: discord.Interaction,
+        enabled: bool,
+    ):
+        config = await require_amadeus_access(interaction, self.module_store)
+
+        if config is None or interaction.guild is None:
+            return
+
+        self.activity_store.set_role_swap_enabled(interaction.guild.id, enabled)
+        self._invalidate(interaction.guild.id)
+        state = "enabled" if enabled else "disabled"
+
+        await interaction.response.send_message(
+            f"Activity role swap **{state}**.",
+            ephemeral=True,
+        )
 
     # ========================================================
     # /activity channel
@@ -394,42 +521,14 @@ class ActivityAdmin(commands.Cog):
         tiers = self.activity_store.get_tiers(interaction.guild.id)
         cooldown = self.activity_store.get_cooldown(interaction.guild.id)
 
-        embed = discord.Embed(
-            title=f"Activity — {member.display_name}",
-            color=discord.Color.blurple(),
+        embed = self._build_status_embed(
+            interaction.guild,
+            member,
+            count=count,
+            tiers=tiers,
+            title_prefix="Activity",
         )
-
-        embed.add_field(name="Messages counted", value=str(count), inline=True)
         embed.add_field(name="Cooldown", value=f"{cooldown}s", inline=True)
-
-        if tiers:
-            tier_lines = []
-            for threshold, role_id in tiers:
-                role = interaction.guild.get_role(role_id)
-                role_text = role.mention if role else f"<deleted {role_id}>"
-                if role is not None and role in member.roles:
-                    icon = "✅"
-                elif count >= threshold:
-                    # Count passed threshold but role missing — added after the fact
-                    icon = "⚠️"
-                else:
-                    icon = "🔒"
-                tier_lines.append(f"{icon} **{threshold}** → {role_text}")
-            embed.add_field(name="Tiers", value="\n".join(tier_lines), inline=False)
-        else:
-            embed.add_field(name="Tiers", value="None configured.", inline=False)
-
-        next_tier = next(((t, r) for t, r in tiers if count < t), None) if tiers else None
-
-        if next_tier is not None:
-            needed = next_tier[0] - count
-            role = interaction.guild.get_role(next_tier[1])
-            role_text = role.mention if role else f"<deleted {next_tier[1]}>"
-            embed.add_field(
-                name="Next tier",
-                value=f"**{needed}** more messages for {role_text}",
-                inline=False,
-            )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

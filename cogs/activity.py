@@ -19,6 +19,7 @@ _ROLE_ALERT_COOLDOWN_SECONDS = 600  # 10 minutes per guild
 @dataclass
 class _GuildCache:
     cooldown_seconds: int
+    role_swap_enabled: bool
     includes: set[int]
     excludes: set[int]
     tiers: list[tuple[int, int]]  # sorted ascending by threshold
@@ -66,10 +67,12 @@ class Activity(commands.Cog):
     def _get_cache(self, guild_id: int) -> _GuildCache:
         if guild_id not in self._cache:
             cooldown = self.activity_store.get_cooldown(guild_id)
+            role_swap_enabled = self.activity_store.get_role_swap_enabled(guild_id)
             includes, excludes = self.activity_store.get_channels(guild_id)
             tiers = self.activity_store.get_tiers(guild_id)
             self._cache[guild_id] = _GuildCache(
                 cooldown_seconds=cooldown,
+                role_swap_enabled=role_swap_enabled,
                 includes=includes,
                 excludes=excludes,
                 tiers=tiers,
@@ -111,6 +114,9 @@ class Activity(commands.Cog):
             return
 
         member = message.author
+        if cache.role_swap_enabled:
+            await self._apply_role_swap(message.guild, member, cache.tiers, new_count)
+            return
 
         for threshold, role_id in cache.tiers:
             if new_count < threshold:
@@ -152,6 +158,72 @@ class Activity(commands.Cog):
                     level="debug",
                     logger_name="activity",
                 )
+
+    async def _apply_role_swap(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        tiers: list[tuple[int, int]],
+        count: int,
+    ) -> None:
+        eligible = [(threshold, role_id) for threshold, role_id in tiers if count >= threshold]
+        if not eligible:
+            return
+
+        threshold, current_role_id = eligible[-1]
+        current_role = guild.get_role(current_role_id)
+        if current_role is None:
+            return
+
+        previous_roles = []
+        configured_role_ids = {role_id for _, role_id in tiers}
+        for role in member.roles:
+            if role.id in configured_role_ids and role.id != current_role_id:
+                previous_roles.append(role)
+
+        try:
+            if current_role not in member.roles:
+                await member.add_roles(current_role, reason=f"Activity milestone: {threshold} messages")
+                log(
+                    f"ACTIVITY // ROLE ASSIGNED 『 USER {member.id} 』 ROLE 『 {current_role_id} 』 "
+                    f"THRESHOLD {threshold} GUILD 『 {guild.id} 』",
+                    level="debug",
+                    logger_name="activity",
+                )
+            if previous_roles:
+                await member.remove_roles(
+                    *previous_roles,
+                    reason=f"Activity role swap: {threshold} messages",
+                )
+                log(
+                    f"ACTIVITY // ROLE SWAP REMOVED 『 USER {member.id} 』 ROLES 『 {[role.id for role in previous_roles]} 』 "
+                    f"GUILD 『 {guild.id} 』",
+                    level="debug",
+                    logger_name="activity",
+                )
+        except discord.Forbidden:
+            log(
+                f"ACTIVITY // FORBIDDEN ROLE SWAP 『 ROLE {current_role_id} 』 GUILD 『 {guild.id} 』",
+                level="debug",
+                logger_name="activity",
+            )
+            now = time.monotonic()
+            if now - self._role_alert_sent_at.get(guild.id, 0.0) >= _ROLE_ALERT_COOLDOWN_SECONDS:
+                self._role_alert_sent_at[guild.id] = now
+                await send_alert(
+                    self.bot,
+                    self.module_store,
+                    guild.id,
+                    f"⚠ **Activity:** Missing permission to apply role swap for <@&{current_role_id}> "
+                    f"(milestone: {threshold} messages). "
+                    "Check the bot's role hierarchy and Manage Roles permission.",
+                )
+        except discord.HTTPException as e:
+            log(
+                f"ACTIVITY // ROLE SWAP HTTP ERROR 『 {e} 』 GUILD 『 {guild.id} 』",
+                level="debug",
+                logger_name="activity",
+            )
 
 
 async def setup(bot: commands.Bot):

@@ -1,6 +1,8 @@
 """
 Activity module storage.
 """
+import sqlite3
+
 from amadeus.database import BaseStore
 
 
@@ -13,10 +15,15 @@ class ActivityStore(BaseStore):
             CREATE TABLE IF NOT EXISTS activity_config (
                 guild_id         INTEGER PRIMARY KEY,
                 cooldown_seconds INTEGER NOT NULL DEFAULT 5,
+                role_swap_enabled INTEGER NOT NULL DEFAULT 0,
                 updated_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        try:
+            self.db.execute("ALTER TABLE activity_config ADD COLUMN role_swap_enabled INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS activity_channels (
@@ -56,6 +63,13 @@ class ActivityStore(BaseStore):
         ).fetchone()
         return row["cooldown_seconds"] if row else 5
 
+    def get_role_swap_enabled(self, guild_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT role_swap_enabled FROM activity_config WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        return bool(row["role_swap_enabled"]) if row else False
+
     def set_cooldown(self, guild_id: int, seconds: int) -> None:
         self.db.execute(
             """
@@ -65,6 +79,18 @@ class ActivityStore(BaseStore):
                 updated_at = CURRENT_TIMESTAMP
             """,
             (guild_id, seconds),
+        )
+        self.db.commit()
+
+    def set_role_swap_enabled(self, guild_id: int, enabled: bool) -> None:
+        self.db.execute(
+            """
+            INSERT INTO activity_config (guild_id, role_swap_enabled) VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                role_swap_enabled = excluded.role_swap_enabled,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (guild_id, int(enabled)),
         )
         self.db.commit()
 
@@ -147,3 +173,16 @@ class ActivityStore(BaseStore):
             (guild_id, user_id),
         ).fetchone()
         return row["count"] if row else 0
+
+    def get_leaderboard(self, guild_id: int, limit: int = 10) -> list[tuple[int, int]]:
+        rows = self.db.execute(
+            """
+            SELECT user_id, count
+            FROM activity_counts
+            WHERE guild_id = ?
+            ORDER BY count DESC, user_id ASC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ).fetchall()
+        return [(row["user_id"], row["count"]) for row in rows]

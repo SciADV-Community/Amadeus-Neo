@@ -19,6 +19,7 @@ async def execute_action(
     action: str | None,
     action_role_id: int | None = None,
     action_reason: str | None = None,
+    delete_history_seconds: int | None = None,
 ) -> str:
     """Takes the given action against a member. Returns a human-readable result."""
     if action is None:
@@ -30,7 +31,11 @@ async def execute_action(
     if action == "kick":
         return await action_kick(member, reason=action_reason)
     if action == "ban":
-        return await action_ban(member, reason=action_reason)
+        return await action_ban(
+            member,
+            reason=action_reason,
+            delete_message_seconds=delete_history_seconds,
+        )
     return f"Unknown action: {action}"
 
 
@@ -96,9 +101,17 @@ async def action_kick(member: discord.Member, *, reason: str | None = None) -> s
         return f"Failed — {e}"
 
 
-async def action_ban(member: discord.Member, *, reason: str | None = None) -> str:
+async def action_ban(
+    member: discord.Member,
+    *,
+    reason: str | None = None,
+    delete_message_seconds: int | None = None,
+) -> str:
     try:
-        await member.ban(reason=reason or DEFAULT_HONEYPOT_REASON, delete_message_days=0)
+        await member.ban(
+            reason=reason or DEFAULT_HONEYPOT_REASON,
+            delete_message_seconds=delete_message_seconds or 0,
+        )
         log(
             f"MODERATION // BAN 『 {member.id} 』 GUILD 『 {member.guild.id} 』",
             level="debug",

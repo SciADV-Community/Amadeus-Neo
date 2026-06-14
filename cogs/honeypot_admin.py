@@ -33,6 +33,18 @@ def honeypot_alerts_hint(enabled: bool, alert_channel_id: int | None) -> str:
     return ""
 
 
+DELETE_HISTORY_LABELS = {
+    3600: "1 hour",
+    21600: "6 hours",
+    43200: "12 hours",
+    86400: "24 hours",
+}
+
+
+def delete_history_label(seconds: int | None) -> str:
+    return DELETE_HISTORY_LABELS.get(seconds, f"{seconds} seconds")
+
+
 # ============================================================
 # HoneypotAdmin cog
 # ============================================================
@@ -131,6 +143,7 @@ class HoneypotAdmin(commands.Cog):
         action="The moderation action to take.",
         role="Role to remove — only required for the remove-role action.",
         reason="Audit log reason for mute, kick, or ban.",
+        delete_history="Delete this member's recent messages when the action succeeds.",
     )
     @app_commands.choices(action=[
         app_commands.Choice(name="Remove role", value="remove_role"),
@@ -138,12 +151,19 @@ class HoneypotAdmin(commands.Cog):
         app_commands.Choice(name="Kick", value="kick"),
         app_commands.Choice(name="Ban", value="ban"),
     ])
+    @app_commands.choices(delete_history=[
+        app_commands.Choice(name="1 hour", value=3600),
+        app_commands.Choice(name="6 hours", value=21600),
+        app_commands.Choice(name="12 hours", value=43200),
+        app_commands.Choice(name="24 hours", value=86400),
+    ])
     async def honeypot_set_action(
         self,
         interaction: discord.Interaction,
         action: str,
         role: discord.Role | None = None,
         reason: app_commands.Range[str, 1, 512] | None = None,
+        delete_history: int | None = None,
     ):
         config = await require_amadeus_access(interaction, self.module_store)
 
@@ -170,6 +190,7 @@ class HoneypotAdmin(commands.Cog):
             action,
             role.id if role else None,
             reason if action in {"mute", "kick", "ban"} else None,
+            delete_history,
         )
         log(
             f"HONEYPOT // ACTION SET 『 {action} 』 ROLE 『 {role.id if role else None} 』 GUILD 『 {interaction.guild.id} 』",
@@ -178,8 +199,13 @@ class HoneypotAdmin(commands.Cog):
         )
 
         reason_note = f"\nAudit log reason: `{reason}`" if action in {"mute", "kick", "ban"} and reason else ""
+        delete_note = (
+            f"\nMessage cleanup window: **{delete_history_label(delete_history)}**"
+            if delete_history is not None
+            else ""
+        )
         await interaction.response.send_message(
-            f"Honeypot action set to **{honeypot_action_label(action, role)}**.{reason_note}",
+            f"Honeypot action set to **{honeypot_action_label(action, role)}**.{reason_note}{delete_note}",
             ephemeral=True,
         )
 

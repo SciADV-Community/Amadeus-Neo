@@ -19,6 +19,7 @@ class HoneypotConfigStore(BaseStore):
                 action          TEXT,
                 action_role_id  INTEGER,
                 action_reason   TEXT,
+                delete_history_seconds INTEGER,
                 alerts_enabled  INTEGER NOT NULL DEFAULT 1,
                 updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -28,13 +29,18 @@ class HoneypotConfigStore(BaseStore):
             self.db.execute("ALTER TABLE honeypot_config ADD COLUMN action_reason TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN delete_history_seconds INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self.db.commit()
 
     def get_config(self, guild_id: int) -> HoneypotConfig | None:
         """Returns the HoneypotConfig for a guild, or None if not yet configured."""
         row = self.db.execute(
             """
-            SELECT guild_id, channel_id, action, action_role_id, action_reason, alerts_enabled
+            SELECT guild_id, channel_id, action, action_role_id, action_reason,
+                   delete_history_seconds, alerts_enabled
             FROM honeypot_config WHERE guild_id = ?
             """,
             (guild_id,),
@@ -49,6 +55,7 @@ class HoneypotConfigStore(BaseStore):
             action=row["action"],
             action_role_id=row["action_role_id"],
             action_reason=row["action_reason"],
+            delete_history_seconds=row["delete_history_seconds"],
             alerts_enabled=bool(row["alerts_enabled"]),
         )
 
@@ -75,19 +82,23 @@ class HoneypotConfigStore(BaseStore):
         action: str,
         role_id: int | None = None,
         reason: str | None = None,
+        delete_history_seconds: int | None = None,
     ) -> None:
         """Persists the moderation action and optional target role."""
         self.db.execute(
             """
-            INSERT INTO honeypot_config (guild_id, action, action_role_id, action_reason)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO honeypot_config (
+                guild_id, action, action_role_id, action_reason, delete_history_seconds
+            )
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 action = excluded.action,
                 action_role_id = excluded.action_role_id,
                 action_reason = excluded.action_reason,
+                delete_history_seconds = excluded.delete_history_seconds,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (guild_id, action, role_id, reason),
+            (guild_id, action, role_id, reason, delete_history_seconds),
         )
         self.db.commit()
 

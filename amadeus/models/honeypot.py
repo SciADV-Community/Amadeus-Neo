@@ -8,4 +8,5 @@ class HoneypotConfig:
     action: str | None = None          # 'remove_role' | 'mute' | 'kick' | 'ban'
     action_role_id: int | None = None  # only used with remove_role
     action_reason: str | None = None   # only used with mute/kick/ban
+    delete_history_seconds: int | None = None
     alerts_enabled: bool = True

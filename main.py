@@ -4,6 +4,7 @@ import os
 import discord
 from discord.ext import commands
 
+from amadeus.application_profile import sync_application_profile
 from amadeus.ascii import build_art_block, build_divider
 from amadeus.cogs import load_extensions, sync_application_commands
 from amadeus.discord_utils import DEFAULT_ALLOWED_MENTIONS
@@ -23,6 +24,7 @@ class MyBot(commands.Bot):
 
         await load_extensions(self)
         await sync_application_commands(self)
+        await sync_application_profile(self)
 
 
 intents = discord.Intents.default()

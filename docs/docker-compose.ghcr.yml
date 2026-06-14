@@ -18,6 +18,8 @@ services:
       AMADEUS_OWNER_ID: ""
       AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
       AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
+      AMADEUS_PRIVACY_POLICY_URL: ""
+      AMADEUS_TERMS_OF_SERVICE_URL: ""
       AMADEUS_MIN_ACCOUNT_AGE_DAYS: "14"
       AMADEUS_MAX_FAILED_ATTEMPTS: "3"
       AMADEUS_CAPTCHA_LENGTH: "6"

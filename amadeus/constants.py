@@ -36,6 +36,15 @@ OWNER_ID: int | None = int(_owner_id_raw) if _owner_id_raw else None
 
 
 # ============================================================
+# Application profile
+# ============================================================
+
+# Optional links appended to the Discord application's About Me / bio.
+PRIVACY_POLICY_URL = os.environ.get("AMADEUS_PRIVACY_POLICY_URL", "").strip()
+TERMS_OF_SERVICE_URL = os.environ.get("AMADEUS_TERMS_OF_SERVICE_URL", "").strip()
+
+
+# ============================================================
 # Backfill settings
 # ============================================================
 

@@ -95,6 +95,8 @@ def test_docker_compose_uses_inline_environment_instead_of_env_file(path):
     assert "    environment:" in content
     assert '      DISCORD_TOKEN: "replace-me"' in content
     assert '      AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"' in content
+    assert '      AMADEUS_PRIVACY_POLICY_URL: ""' in content
+    assert '      AMADEUS_TERMS_OF_SERVICE_URL: ""' in content
 
 
 def test_docker_publish_workflow_build_depends_on_unit_tests():

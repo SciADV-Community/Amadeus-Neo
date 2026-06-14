@@ -94,9 +94,12 @@ environment:
   AMADEUS_OWNER_ID: "your-discord-user-id"
   AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
   AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
+  AMADEUS_PRIVACY_POLICY_URL: "https://example.com/privacy/"
+  AMADEUS_TERMS_OF_SERVICE_URL: "https://example.com/terms/"
 ```
 
 `AMADEUS_COGS` controls which optional modules are loaded. Leave it blank to load no optional modules.
+`AMADEUS_PRIVACY_POLICY_URL` and `AMADEUS_TERMS_OF_SERVICE_URL` are optional. When set, the bot appends those links to the Discord application's About Me / bio on startup.
 
 The compose file uses:
 

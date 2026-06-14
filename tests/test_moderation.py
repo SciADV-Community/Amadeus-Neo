@@ -29,7 +29,7 @@ def test_action_ban_uses_default_audit_log_reason_when_reason_is_missing():
     assert result == "Banned."
     member.ban.assert_awaited_once_with(
         reason=DEFAULT_HONEYPOT_REASON,
-        delete_message_days=0,
+        delete_message_seconds=0,
     )
 
 
@@ -56,6 +56,26 @@ def test_execute_action_passes_reason_to_moderation_action():
 
     assert result == "Kicked."
     member.kick.assert_awaited_once_with(reason="Configured reason")
+
+
+def test_execute_action_passes_delete_history_window_to_ban():
+    member = SimpleNamespace(ban=AsyncMock(), guild=SimpleNamespace(id=1), id=2)
+
+    result = asyncio.run(
+        execute_action(
+            guild=SimpleNamespace(id=1),
+            member=member,
+            action="ban",
+            action_reason="Configured reason",
+            delete_history_seconds=86400,
+        )
+    )
+
+    assert result == "Banned."
+    member.ban.assert_awaited_once_with(
+        reason="Configured reason",
+        delete_message_seconds=86400,
+    )
 
 
 def test_action_remove_role_requires_configured_role():

@@ -44,8 +44,8 @@ def make_cog(config=None, *, enabled=True, guild_config=None):
     return cog
 
 
-def make_message(*, guild_id=1, channel_id=10, author=None, content="trap"):
-    guild = SimpleNamespace(id=guild_id)
+def make_message(*, guild_id=1, channel_id=10, author=None, content="trap", guild=None):
+    guild = guild or SimpleNamespace(id=guild_id)
     return SimpleNamespace(
         guild=guild,
         channel=SimpleNamespace(id=channel_id),
@@ -127,13 +127,21 @@ def test_honeypot_deletes_message_before_action_and_passes_reason(monkeypatch):
     async def delete():
         events.append("delete")
 
-    async def execute_action(guild, member, action, action_role_id, action_reason):
+    async def execute_action(
+        guild,
+        member,
+        action,
+        action_role_id,
+        action_reason,
+        delete_history_seconds,
+    ):
         events.append("action")
         assert guild.id == 1
         assert member.id == 2
         assert action == "ban"
         assert action_role_id is None
         assert action_reason == "Configured audit reason"
+        assert delete_history_seconds is None
         return "Banned."
 
     monkeypatch.setattr(honeypot_module, "execute_action", execute_action)
@@ -152,6 +160,54 @@ def test_honeypot_deletes_message_before_action_and_passes_reason(monkeypatch):
     asyncio.run(cog.on_message(message))
 
     assert events == ["delete", "action"]
+
+
+def test_honeypot_deletes_recent_member_messages_after_successful_non_ban_action(monkeypatch):
+    monkeypatch.setattr(honeypot_module.discord, "Member", FakeMember)
+    purge = AsyncMock(return_value=[SimpleNamespace(id=1), SimpleNamespace(id=2)])
+    channel = SimpleNamespace(id=20, purge=purge)
+    guild = SimpleNamespace(id=1, text_channels=[channel])
+    monkeypatch.setattr(honeypot_module, "execute_action", AsyncMock(return_value="Kicked."))
+    monkeypatch.setattr(honeypot_module, "send_alert", AsyncMock())
+    config = SimpleNamespace(
+        channel_id=10,
+        action="kick",
+        action_role_id=None,
+        action_reason=None,
+        delete_history_seconds=3600,
+        alerts_enabled=False,
+    )
+    cog = make_cog(config)
+    message = make_message(guild=guild)
+
+    asyncio.run(cog.on_message(message))
+
+    purge.assert_awaited_once()
+    assert purge.await_args.kwargs["limit"] is None
+    assert purge.await_args.kwargs["reason"] == "Honeypot triggered message cleanup"
+
+
+def test_honeypot_does_not_delete_history_when_action_fails(monkeypatch):
+    monkeypatch.setattr(honeypot_module.discord, "Member", FakeMember)
+    purge = AsyncMock()
+    channel = SimpleNamespace(id=20, purge=purge)
+    guild = SimpleNamespace(id=1, text_channels=[channel])
+    monkeypatch.setattr(honeypot_module, "execute_action", AsyncMock(return_value="Failed — missing permission."))
+    monkeypatch.setattr(honeypot_module, "send_alert", AsyncMock())
+    config = SimpleNamespace(
+        channel_id=10,
+        action="kick",
+        action_role_id=None,
+        action_reason=None,
+        delete_history_seconds=3600,
+        alerts_enabled=False,
+    )
+    cog = make_cog(config)
+    message = make_message(guild=guild)
+
+    asyncio.run(cog.on_message(message))
+
+    purge.assert_not_awaited()
 
 
 def test_honeypot_skips_action_for_configured_admin_role(monkeypatch):

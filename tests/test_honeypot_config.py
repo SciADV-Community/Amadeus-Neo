@@ -3,10 +3,15 @@ import sqlite3
 from amadeus.honeypot_config import HoneypotConfigStore
 
 
-def test_set_action_persists_moderation_reason(temp_db_path):
+def test_set_action_persists_moderation_reason_and_delete_history_window(temp_db_path):
     store = HoneypotConfigStore()
     try:
-        store.set_action(1, "ban", reason="Custom audit reason")
+        store.set_action(
+            1,
+            "ban",
+            reason="Custom audit reason",
+            delete_history_seconds=3600,
+        )
 
         config = store.get_config(1)
     finally:
@@ -15,6 +20,7 @@ def test_set_action_persists_moderation_reason(temp_db_path):
     assert config.action == "ban"
     assert config.action_role_id is None
     assert config.action_reason == "Custom audit reason"
+    assert config.delete_history_seconds == 3600
 
 
 def test_set_action_clears_reason_when_switching_to_remove_role(temp_db_path):
@@ -30,6 +36,7 @@ def test_set_action_clears_reason_when_switching_to_remove_role(temp_db_path):
     assert config.action == "remove_role"
     assert config.action_role_id == 123
     assert config.action_reason is None
+    assert config.delete_history_seconds is None
 
 
 def test_honeypot_config_migration_adds_action_reason_to_existing_table(temp_db_path):
@@ -57,19 +64,20 @@ def test_honeypot_config_migration_adds_action_reason_to_existing_table(temp_db_
 
     store = HoneypotConfigStore()
     try:
-        store.set_action(1, "mute", reason="Migrated reason")
+        store.set_action(1, "mute", reason="Migrated reason", delete_history_seconds=21600)
         config = store.get_config(1)
     finally:
         store.close()
 
     assert config.action == "mute"
     assert config.action_reason == "Migrated reason"
+    assert config.delete_history_seconds == 21600
 
 
 def test_honeypot_config_setters_preserve_existing_fields(temp_db_path):
     store = HoneypotConfigStore()
     try:
-        store.set_action(1, "kick", reason="Keep this")
+        store.set_action(1, "kick", reason="Keep this", delete_history_seconds=43200)
         store.set_channel(1, 456)
         store.set_alerts_enabled(1, False)
 
@@ -80,4 +88,5 @@ def test_honeypot_config_setters_preserve_existing_fields(temp_db_path):
     assert config.channel_id == 456
     assert config.action == "kick"
     assert config.action_reason == "Keep this"
+    assert config.delete_history_seconds == 43200
     assert config.alerts_enabled is False

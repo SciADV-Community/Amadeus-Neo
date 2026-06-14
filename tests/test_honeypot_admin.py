@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cogs.honeypot_admin import honeypot_action_label, honeypot_alerts_hint
+from cogs.honeypot_admin import delete_history_label, honeypot_action_label, honeypot_alerts_hint
 
 
 @pytest.mark.parametrize(
@@ -41,3 +41,16 @@ def test_honeypot_alerts_hint_is_empty_when_admin_channel_is_configured():
 
 def test_honeypot_alerts_hint_is_empty_when_disabling_alerts():
     assert honeypot_alerts_hint(False, None) == ""
+
+
+@pytest.mark.parametrize(
+    ("seconds", "label"),
+    [
+        (3600, "1 hour"),
+        (21600, "6 hours"),
+        (43200, "12 hours"),
+        (86400, "24 hours"),
+    ],
+)
+def test_delete_history_label_formats_supported_windows(seconds, label):
+    assert delete_history_label(seconds) == label

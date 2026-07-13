@@ -20,6 +20,8 @@ class HoneypotConfigStore(BaseStore):
                 action_role_id  INTEGER,
                 action_reason   TEXT,
                 delete_history_seconds INTEGER,
+                post_message    TEXT,
+                post_message_id INTEGER,
                 alerts_enabled  INTEGER NOT NULL DEFAULT 1,
                 updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -33,6 +35,14 @@ class HoneypotConfigStore(BaseStore):
             self.db.execute("ALTER TABLE honeypot_config ADD COLUMN delete_history_seconds INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN post_message TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN post_message_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self.db.commit()
 
     def get_config(self, guild_id: int) -> HoneypotConfig | None:
@@ -40,7 +50,7 @@ class HoneypotConfigStore(BaseStore):
         row = self.db.execute(
             """
             SELECT guild_id, channel_id, action, action_role_id, action_reason,
-                   delete_history_seconds, alerts_enabled
+                   delete_history_seconds, post_message, post_message_id, alerts_enabled
             FROM honeypot_config WHERE guild_id = ?
             """,
             (guild_id,),
@@ -56,6 +66,8 @@ class HoneypotConfigStore(BaseStore):
             action_role_id=row["action_role_id"],
             action_reason=row["action_reason"],
             delete_history_seconds=row["delete_history_seconds"],
+            post_message=row["post_message"],
+            post_message_id=row["post_message_id"],
             alerts_enabled=bool(row["alerts_enabled"]),
         )
 
@@ -105,3 +117,11 @@ class HoneypotConfigStore(BaseStore):
     def set_alerts_enabled(self, guild_id: int, enabled: bool) -> None:
         """Enables or disables admin channel alerts when the honeypot is triggered."""
         self._upsert(guild_id, "alerts_enabled", int(enabled))
+
+    def set_post_message(self, guild_id: int, message: str) -> None:
+        """Persists the message posted by /honeypot post for the guild."""
+        self._upsert(guild_id, "post_message", message)
+
+    def set_post_message_id(self, guild_id: int, message_id: int) -> None:
+        """Persists the Discord message ID managed by /honeypot post."""
+        self._upsert(guild_id, "post_message_id", message_id)

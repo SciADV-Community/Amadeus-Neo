@@ -312,7 +312,8 @@ class AmadeusAdmin(commands.Cog):
                 "**Next steps:**\n"
                 "1. `/honeypot set-channel <channel>` — trap channel\n"
                 "2. `/honeypot set-action <action>` — action taken on anyone who posts\n"
-                "3. `/honeypot post` — post the warning embed in the channel"
+                "3. *(Optional)* `/honeypot message <message>` — customize the warning message\n"
+                "4. `/honeypot post` — post or update the warning message in the channel"
             ),
             "boost": (
                 "**Next steps:**\n"

@@ -159,3 +159,34 @@ def test_start_verification_resends_existing_captcha_image(monkeypatch):
     assert "You already have an active CAPTCHA." in kwargs["embed"].description
     assert "Attempts used: **1/3**" in kwargs["embed"].description
     assert "Attempts left: **2**" in kwargs["embed"].description
+
+
+def test_code_expires_challenge_using_per_server_setting(monkeypatch):
+    monkeypatch.setattr(bouncer_module.discord, "Member", FakeMember)
+    role = SimpleNamespace(id=10)
+    config = BounceConfig(
+        guild_id=1,
+        verified_role_id=10,
+        verification_channel_id=20,
+        captcha_expiry_minutes=1,
+    )
+    cog = make_bouncer()
+    cog.get_ready_config = AsyncMock(return_value=(config, role, SimpleNamespace(id=20)))
+    cog.require_verify_channel = AsyncMock(return_value=True)
+    cog.complete_verification = AsyncMock()
+    cog.fail_code_attempt = AsyncMock()
+    cog.active_challenges[(1, 2)] = CaptchaChallenge(
+        answer="ABC123",
+        created_at=discord.utils.utcnow() - timedelta(minutes=2),
+    )
+    interaction = make_interaction(FakeMember())
+
+    asyncio.run(Bouncer.code.callback(cog, interaction, "ABC123"))
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "You do not have an active CAPTCHA. Run `/verify` first.",
+        ephemeral=True,
+    )
+    cog.complete_verification.assert_not_awaited()
+    cog.fail_code_attempt.assert_not_awaited()
+    assert cog.active_challenges == {}

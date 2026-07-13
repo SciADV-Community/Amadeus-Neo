@@ -72,6 +72,8 @@ def test_honeypot_config_migration_adds_action_reason_to_existing_table(temp_db_
     assert config.action == "mute"
     assert config.action_reason == "Migrated reason"
     assert config.delete_history_seconds == 21600
+    assert config.post_message is None
+    assert config.post_message_id is None
 
 
 def test_honeypot_config_setters_preserve_existing_fields(temp_db_path):
@@ -79,6 +81,8 @@ def test_honeypot_config_setters_preserve_existing_fields(temp_db_path):
     try:
         store.set_action(1, "kick", reason="Keep this", delete_history_seconds=43200)
         store.set_channel(1, 456)
+        store.set_post_message(1, "Custom warning")
+        store.set_post_message_id(1, 789)
         store.set_alerts_enabled(1, False)
 
         config = store.get_config(1)
@@ -89,4 +93,32 @@ def test_honeypot_config_setters_preserve_existing_fields(temp_db_path):
     assert config.action == "kick"
     assert config.action_reason == "Keep this"
     assert config.delete_history_seconds == 43200
+    assert config.post_message == "Custom warning"
+    assert config.post_message_id == 789
     assert config.alerts_enabled is False
+
+
+def test_set_post_message_overwrites_previous_message(temp_db_path):
+    store = HoneypotConfigStore()
+    try:
+        store.set_post_message(1, "Old warning")
+        store.set_post_message(1, "New warning")
+
+        config = store.get_config(1)
+    finally:
+        store.close()
+
+    assert config.post_message == "New warning"
+
+
+def test_set_post_message_id_overwrites_previous_message_id(temp_db_path):
+    store = HoneypotConfigStore()
+    try:
+        store.set_post_message_id(1, 111)
+        store.set_post_message_id(1, 222)
+
+        config = store.get_config(1)
+    finally:
+        store.close()
+
+    assert config.post_message_id == 222

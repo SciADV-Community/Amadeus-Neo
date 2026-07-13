@@ -114,7 +114,7 @@ class Honeypot(commands.Cog):
         if message.guild is None:
             return
 
-        # Allow the bot's own messages (e.g. the warning embed); block everyone else including other bots.
+        # Allow the bot's own messages (e.g. the warning post); block everyone else including other bots.
         if message.author.id == self.bot.user.id:
             return
 

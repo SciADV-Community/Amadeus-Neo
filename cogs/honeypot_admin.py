@@ -1,9 +1,11 @@
+import re
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from amadeus.database import ConfigStore
-from amadeus.discord_utils import SLOWMODE_HONEYPOT
+from amadeus.discord_utils import NO_MENTIONS, SLOWMODE_HONEYPOT
 from amadeus.honeypot_config import HoneypotConfigStore
 from amadeus.logging_utils import log
 from amadeus.models.honeypot import HoneypotConfig
@@ -40,9 +42,55 @@ DELETE_HISTORY_LABELS = {
     86400: "24 hours",
 }
 
+HONEYPOT_POST_MESSAGE_MAX_LENGTH = 2000
+DEFAULT_HONEYPOT_POST_MESSAGE = (
+    "**Restricted Channel**\n\n"
+    "This channel is monitored.\n\n"
+    "Posting here will result in immediate moderation action against your account."
+)
+URL_RE = re.compile(
+    r"(?i)(?:https?://|www\.|discord(?:\.gg|app\.com/invite)/)\S+"
+    r"|\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z]{2,}(?:[/?#]\S*)?"
+)
+
 
 def delete_history_label(seconds: int | None) -> str:
     return DELETE_HISTORY_LABELS.get(seconds, f"{seconds} seconds")
+
+
+def honeypot_post_message_error(message: str) -> str | None:
+    message = message.strip()
+    if not message:
+        return "Honeypot message cannot be empty."
+    if len(message) > HONEYPOT_POST_MESSAGE_MAX_LENGTH:
+        return f"Honeypot message must be {HONEYPOT_POST_MESSAGE_MAX_LENGTH} characters or fewer."
+    if URL_RE.search(message):
+        return "Honeypot message cannot contain URLs."
+    return None
+
+
+async def find_existing_honeypot_post(
+    channel: discord.TextChannel,
+    bot_user_id: int,
+    message_id: int | None,
+) -> discord.Message | None:
+    if message_id is not None:
+        try:
+            message = await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            message = None
+        else:
+            if message.author.id == bot_user_id:
+                return message
+
+    try:
+        async for message in channel.history(limit=50, oldest_first=True):
+            if message.author.id == bot_user_id:
+                return message
+    except (discord.Forbidden, discord.HTTPException):
+        return None
+
+    return None
 
 
 # ============================================================
@@ -53,7 +101,7 @@ class HoneypotAdmin(commands.Cog):
     """
     Admin cog for the honeypot module.
 
-    Commands: /honeypot set-channel, set-action, enable-alerts, post
+    Commands: /honeypot set-channel, set-action, enable-alerts, message, post
     """
 
     honeypot = app_commands.Group(
@@ -240,8 +288,46 @@ class HoneypotAdmin(commands.Cog):
         )
 
     @honeypot.command(
+        name="message",
+        description="Set the message posted by /honeypot post.",
+    )
+    @app_commands.describe(
+        message=(
+            "Message to post in the honeypot channel. URLs are not allowed. "
+            f"Max {HONEYPOT_POST_MESSAGE_MAX_LENGTH} characters."
+        )
+    )
+    async def honeypot_message(
+        self,
+        interaction: discord.Interaction,
+        message: app_commands.Range[str, 1, HONEYPOT_POST_MESSAGE_MAX_LENGTH],
+    ):
+        config = await require_amadeus_access(interaction, self.module_store)
+
+        if config is None or interaction.guild is None:
+            return
+
+        message = message.strip()
+        error = honeypot_post_message_error(message)
+        if error is not None:
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        self.honeypot_store.set_post_message(interaction.guild.id, message)
+        log(
+            f"HONEYPOT // POST MESSAGE SET 『 GUILD {interaction.guild.id} 』",
+            level="debug",
+            logger_name="honeypot",
+        )
+
+        await interaction.response.send_message(
+            "Honeypot post message updated.",
+            ephemeral=True,
+        )
+
+    @honeypot.command(
         name="post",
-        description="Post a warning embed in the configured honeypot channel.",
+        description="Post the configured warning message in the honeypot channel.",
     )
     async def honeypot_post(self, interaction: discord.Interaction):
         config = await require_amadeus_access(interaction, self.module_store)
@@ -277,27 +363,42 @@ class HoneypotAdmin(commands.Cog):
             )
             return
 
-        embed = discord.Embed(
-            title="⚠ Restricted Channel",
-            description=(
-                "This channel is monitored.\n\n"
-                "Posting here will result in immediate moderation action against your account."
-            ),
-            color=discord.Color.red(),
-        )
-
-        try:
-            await channel.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException) as e:
-            log(f"HONEYPOT // POST // SEND FAILED 『 CHANNEL {channel.id} 』 GUILD 『 {interaction.guild.id} 』 // {e}", level="debug", logger_name="honeypot")
+        bot_user = self.bot.user
+        if bot_user is None:
             await interaction.response.send_message(
-                f"Failed to post the warning in {channel.mention} — {e}",
+                "Cannot post the warning message because the bot user is not ready.",
                 ephemeral=True,
             )
             return
 
+        post_message = honeypot_config.post_message or DEFAULT_HONEYPOT_POST_MESSAGE
+        existing_message = await find_existing_honeypot_post(
+            channel,
+            bot_user.id,
+            honeypot_config.post_message_id,
+        )
+        try:
+            if existing_message is not None:
+                sent_message = await existing_message.edit(
+                    content=post_message,
+                    embeds=[],
+                    allowed_mentions=NO_MENTIONS,
+                )
+                action = "updated"
+            else:
+                sent_message = await channel.send(post_message, allowed_mentions=NO_MENTIONS)
+                action = "posted"
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log(f"HONEYPOT // POST // SEND FAILED 『 CHANNEL {channel.id} 』 GUILD 『 {interaction.guild.id} 』 // {e}", level="debug", logger_name="honeypot")
+            await interaction.response.send_message(
+                f"Failed to post the warning message in {channel.mention} — {e}",
+                ephemeral=True,
+            )
+            return
+
+        self.honeypot_store.set_post_message_id(interaction.guild.id, sent_message.id)
         await interaction.response.send_message(
-            f"Warning embed posted in {channel.mention}.",
+            f"Warning message {action} in {channel.mention}.",
             ephemeral=True,
         )
 

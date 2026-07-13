@@ -1,6 +1,10 @@
 # Changelog
 
 ---
+### v1.5.0
+- Added custom message for honeypot post
+- Honeypot post will now attempt to update the previous post if it exists
+
 ### v1.4.0
 - Added public `/activity status` and `/activity leaderboard` commands.
 - Added `/activity tier role-swap` to keep only a member's highest earned activity role.

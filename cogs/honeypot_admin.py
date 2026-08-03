@@ -11,6 +11,7 @@ from amadeus.logging_utils import log
 from amadeus.models.honeypot import HoneypotConfig
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
+from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
 
 
 def honeypot_action_label(action: str, role: discord.Role | None = None) -> str:
@@ -101,14 +102,12 @@ class HoneypotAdmin(commands.Cog):
     """
     Admin cog for the honeypot module.
 
-    Commands: /honeypot set-channel, set-action, enable-alerts, message, post
+    Commands: /amadeus honeypot set-channel, set-action, enable-alerts, message, post
     """
 
     honeypot = app_commands.Group(
         name="honeypot",
         description="Honeypot admin commands.",
-        guild_only=True,
-        default_permissions=discord.Permissions(manage_roles=True),
     )
 
     def __init__(self, bot: commands.Bot):
@@ -122,6 +121,7 @@ class HoneypotAdmin(commands.Cog):
         )
 
     def cog_unload(self):
+        detach_amadeus_subgroup(self.bot, self.honeypot.name)
         self.honeypot_store.close()
         self.module_store.close()
 
@@ -289,7 +289,7 @@ class HoneypotAdmin(commands.Cog):
 
     @honeypot.command(
         name="message",
-        description="Set the message posted by /honeypot post.",
+        description="Set the message posted by /amadeus honeypot post.",
     )
     @app_commands.describe(
         message=(
@@ -349,7 +349,7 @@ class HoneypotAdmin(commands.Cog):
 
         if honeypot_config.channel_id is None:
             await interaction.response.send_message(
-                "Set a honeypot channel first with `/honeypot set-channel`.",
+                "Set a honeypot channel first with `/amadeus honeypot set-channel`.",
                 ephemeral=True,
             )
             return
@@ -358,7 +358,7 @@ class HoneypotAdmin(commands.Cog):
 
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message(
-                "The configured honeypot channel no longer exists. Set a new one with `/honeypot set-channel`.",
+                "The configured honeypot channel no longer exists. Set a new one with `/amadeus honeypot set-channel`.",
                 ephemeral=True,
             )
             return
@@ -404,4 +404,11 @@ class HoneypotAdmin(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(HoneypotAdmin(bot))
+    cog = HoneypotAdmin(bot)
+    attach_amadeus_subgroup(bot, cog, cog.honeypot)
+
+    try:
+        await bot.add_cog(cog)
+    except Exception:
+        detach_amadeus_subgroup(bot, cog.honeypot.name)
+        raise

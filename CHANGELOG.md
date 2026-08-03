@@ -1,6 +1,11 @@
 # Changelog
 
 ---
+### v1.6.0
+- Moved module admin/config commands under `/amadeus activity`, `/amadeus boost`, `/amadeus bouncer`, and `/amadeus honeypot`.
+- Kept member-facing commands at `/activity status`, `/activity leaderboard`, `/boost status`, `/verify`, and `/code`.
+
+---
 ### v1.5.0
 - Added custom message for honeypot post
 - Honeypot post will now attempt to update the previous post if it exists

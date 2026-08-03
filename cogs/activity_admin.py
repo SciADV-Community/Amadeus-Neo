@@ -8,6 +8,7 @@ from amadeus.discord_utils import check_role_hierarchy
 from amadeus.logging_utils import log
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
+from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
 
 
 class ActivityAdmin(commands.Cog):
@@ -15,10 +16,12 @@ class ActivityAdmin(commands.Cog):
     Admin cog for the activity module.
 
     Commands:
-      /activity tier     add, remove, list
-      /activity channel  include, exclude, remove, list
-      /activity settings cooldown
-      /activity admin    status
+      /activity status
+      /activity leaderboard
+      /amadeus activity tier-add, tier-remove, tier-list, role-swap
+      /amadeus activity channel-include, channel-exclude, channel-remove, channel-list
+      /amadeus activity cooldown
+      /amadeus activity status
     """
 
     activity = app_commands.Group(
@@ -27,32 +30,9 @@ class ActivityAdmin(commands.Cog):
         guild_only=True,
     )
 
-    tier = app_commands.Group(
-        name="tier",
-        description="Configure activity role tiers.",
-        parent=activity,
-        default_permissions=discord.Permissions(manage_roles=True),
-    )
-
-    channel = app_commands.Group(
-        name="channel",
-        description="Configure which channels count toward activity.",
-        parent=activity,
-        default_permissions=discord.Permissions(manage_roles=True),
-    )
-
-    settings = app_commands.Group(
-        name="settings",
-        description="Tune activity tracking behavior.",
-        parent=activity,
-        default_permissions=discord.Permissions(manage_roles=True),
-    )
-
-    admin = app_commands.Group(
-        name="admin",
-        description="Inspect member activity.",
-        parent=activity,
-        default_permissions=discord.Permissions(manage_roles=True),
+    amadeus_activity = app_commands.Group(
+        name="activity",
+        description="Activity admin commands.",
     )
 
     def __init__(self, bot: commands.Bot):
@@ -66,6 +46,7 @@ class ActivityAdmin(commands.Cog):
         )
 
     def cog_unload(self):
+        detach_amadeus_subgroup(self.bot, self.amadeus_activity.name)
         self.activity_store.close()
         self.module_store.close()
 
@@ -178,10 +159,10 @@ class ActivityAdmin(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     # ========================================================
-    # /activity tier
+    # /amadeus activity tier
     # ========================================================
 
-    @tier.command(name="add", description="Add a role tier at a message count threshold.")
+    @amadeus_activity.command(name="tier-add", description="Add a role tier at a message count threshold.")
     @app_commands.describe(
         threshold="Number of messages required.",
         role="Role to assign when the threshold is reached.",
@@ -240,7 +221,7 @@ class ActivityAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @tier.command(name="remove", description="Remove the tier at the given message threshold.")
+    @amadeus_activity.command(name="tier-remove", description="Remove the tier at the given message threshold.")
     @app_commands.describe(threshold="The threshold of the tier to remove.")
     async def tier_remove(
         self,
@@ -273,7 +254,7 @@ class ActivityAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @tier.command(name="list", description="List all configured activity tiers.")
+    @amadeus_activity.command(name="tier-list", description="List all configured activity tiers.")
     async def tier_list(self, interaction: discord.Interaction):
         config = await require_amadeus_access(interaction, self.module_store)
 
@@ -284,7 +265,7 @@ class ActivityAdmin(commands.Cog):
 
         if not tiers:
             await interaction.response.send_message(
-                "No tiers configured. Add one with `/activity tier add`.",
+                "No tiers configured. Add one with `/amadeus activity tier-add`.",
                 ephemeral=True,
             )
             return
@@ -303,7 +284,7 @@ class ActivityAdmin(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @tier.command(name="role-swap", description="Only keep the member's highest earned activity role.")
+    @amadeus_activity.command(name="role-swap", description="Only keep the member's highest earned activity role.")
     @app_commands.describe(enabled="True removes older tier roles when a newer tier is earned.")
     async def tier_role_swap(
         self,
@@ -325,11 +306,11 @@ class ActivityAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /activity channel
+    # /amadeus activity channel
     # ========================================================
 
-    @channel.command(
-        name="include",
+    @amadeus_activity.command(
+        name="channel-include",
         description="Only count messages from this channel (switches to whitelist mode).",
     )
     @app_commands.describe(channel="Channel to include.")
@@ -357,7 +338,7 @@ class ActivityAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @channel.command(name="exclude", description="Don't count messages from this channel.")
+    @amadeus_activity.command(name="channel-exclude", description="Don't count messages from this channel.")
     @app_commands.describe(channel="Channel to exclude.")
     async def channel_exclude(
         self,
@@ -382,7 +363,7 @@ class ActivityAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @channel.command(name="remove", description="Remove a channel from the include or exclude list.")
+    @amadeus_activity.command(name="channel-remove", description="Remove a channel from the include or exclude list.")
     @app_commands.describe(channel="Channel to remove.")
     async def channel_remove(
         self,
@@ -415,7 +396,7 @@ class ActivityAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @channel.command(name="list", description="Show channel filter configuration.")
+    @amadeus_activity.command(name="channel-list", description="Show channel filter configuration.")
     async def channel_list(self, interaction: discord.Interaction):
         config = await require_amadeus_access(interaction, self.module_store)
 
@@ -463,10 +444,10 @@ class ActivityAdmin(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ========================================================
-    # /activity settings
+    # /amadeus activity settings
     # ========================================================
 
-    @settings.command(
+    @amadeus_activity.command(
         name="cooldown",
         description="Minimum seconds between counted messages per user.",
     )
@@ -502,10 +483,10 @@ class ActivityAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /activity admin
+    # /amadeus activity admin
     # ========================================================
 
-    @admin.command(name="status", description="Check a member's activity count and tier progress.")
+    @amadeus_activity.command(name="status", description="Check a member's activity count and tier progress.")
     @app_commands.describe(member="The member to inspect.")
     async def admin_status(
         self,
@@ -534,4 +515,11 @@ class ActivityAdmin(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ActivityAdmin(bot))
+    cog = ActivityAdmin(bot)
+    attach_amadeus_subgroup(bot, cog, cog.amadeus_activity)
+
+    try:
+        await bot.add_cog(cog)
+    except Exception:
+        detach_amadeus_subgroup(bot, cog.amadeus_activity.name)
+        raise

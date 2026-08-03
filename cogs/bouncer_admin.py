@@ -24,6 +24,7 @@ from amadeus.logging_utils import log
 from amadeus.models.bouncer import BounceConfig
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
+from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
 from cogs.bouncer import BouncerPanelView
 
 
@@ -105,11 +106,11 @@ class BounceAdmin(commands.Cog):
     Admin cog for the bouncer module.
 
     Commands:
-      /bouncer setup    set-role, set-channel, post-panel
-      /bouncer settings min-account-age-days, max-failed-attempts,
-                        captcha-expiration-minutes, panel-image,
-                        verification-role-delay-seconds
-      /bouncer admin    verify, unverify, verify-all, backfill-status, cancel-backfill
+      /amadeus bouncer set-role, set-channel, post-panel
+      /amadeus bouncer min-account-age-days, max-failed-attempts,
+                       captcha-expiration-minutes, panel-image,
+                       verification-role-delay-seconds
+      /amadeus bouncer verify, unverify, verify-all, backfill-status, cancel-backfill
 
     Auto-paired with cogs.bouncer by the extension loader.
     Registers BouncerPanelView so the panel button survives restarts.
@@ -117,27 +118,7 @@ class BounceAdmin(commands.Cog):
 
     bouncer = app_commands.Group(
         name="bouncer",
-        description="Bouncer commands.",
-        guild_only=True,
-        default_permissions=discord.Permissions(manage_roles=True),
-    )
-
-    setup = app_commands.Group(
-        name="setup",
-        description="Configure the verification channel, role, and panel.",
-        parent=bouncer,
-    )
-
-    settings = app_commands.Group(
-        name="settings",
-        description="Tune per-server bouncer behaviour.",
-        parent=bouncer,
-    )
-
-    admin = app_commands.Group(
-        name="admin",
-        description="Manual verification and bulk operations.",
-        parent=bouncer,
+        description="Bouncer admin commands.",
     )
 
     def __init__(self, bot: commands.Bot):
@@ -156,6 +137,7 @@ class BounceAdmin(commands.Cog):
         )
 
     def cog_unload(self):
+        detach_amadeus_subgroup(self.bot, self.bouncer.name)
         for task in self.backfill_tasks.values():
             task.cancel()
 
@@ -202,10 +184,10 @@ class BounceAdmin(commands.Cog):
         return config if config is not None else BounceConfig(guild_id=guild.id)
 
     # ========================================================
-    # /bouncer setup
+    # /amadeus bouncer setup
     # ========================================================
 
-    @setup.command(
+    @bouncer.command(
         name="set-role",
         description="Set the role users receive after passing verification.",
     )
@@ -252,7 +234,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @setup.command(
+    @bouncer.command(
         name="set-channel",
         description="Set the channel where users verify.",
     )
@@ -286,7 +268,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @setup.command(
+    @bouncer.command(
         name="post-panel",
         description="Post the public verification panel in the configured verification channel.",
     )
@@ -301,14 +283,14 @@ class BounceAdmin(commands.Cog):
 
         if channel is None:
             await interaction.response.send_message(
-                "Set a verification channel first with `/bouncer setup set-channel`.",
+                "Set a verification channel first with `/amadeus bouncer set-channel`.",
                 ephemeral=True,
             )
             return
 
         if self.get_verified_role(interaction.guild, bounce_config) is None:
             await interaction.response.send_message(
-                "Set a Verified role first with `/bouncer setup set-role`.",
+                "Set a Verified role first with `/amadeus bouncer set-role`.",
                 ephemeral=True,
             )
             return
@@ -327,7 +309,7 @@ class BounceAdmin(commands.Cog):
             await interaction.response.send_message(
                 (
                     f"{channel.mention} does not have slow-mode enabled.\n\n"
-                    "Run `/bouncer setup set-channel` again to apply it, or set it "
+                    "Run `/amadeus bouncer set-channel` again to apply it, or set it "
                     "manually in the channel settings before posting the panel."
                 ),
                 ephemeral=True,
@@ -362,10 +344,10 @@ class BounceAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /bouncer settings
+    # /amadeus bouncer settings
     # ========================================================
 
-    @settings.command(
+    @bouncer.command(
         name="min-account-age-days",
         description="Minimum age a Discord account must be to start verification.",
     )
@@ -395,7 +377,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @settings.command(
+    @bouncer.command(
         name="max-failed-attempts",
         description="Number of failed CAPTCHA attempts before a user is kicked.",
     )
@@ -425,7 +407,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @settings.command(
+    @bouncer.command(
         name="captcha-expiration-minutes",
         description="Minutes before an unsolved CAPTCHA challenge expires.",
     )
@@ -455,7 +437,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @settings.command(
+    @bouncer.command(
         name="panel-image",
         description="Upload the image displayed on the verification panel. Omit to clear.",
     )
@@ -482,16 +464,16 @@ class BounceAdmin(commands.Cog):
 
         if image_url:
             await interaction.response.send_message(
-                "Panel image set. Run `/bouncer setup post-panel` to repost the panel.",
+                "Panel image set. Run `/amadeus bouncer post-panel` to repost the panel.",
                 ephemeral=True,
             )
         else:
             await interaction.response.send_message(
-                "Panel image cleared. Run `/bouncer setup post-panel` to repost the panel.",
+                "Panel image cleared. Run `/amadeus bouncer post-panel` to repost the panel.",
                 ephemeral=True,
             )
 
-    @settings.command(
+    @bouncer.command(
         name="verification-role-delay-seconds",
         description="Seconds to wait before granting the Verified role after a successful CAPTCHA.",
     )
@@ -522,10 +504,10 @@ class BounceAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /bouncer admin
+    # /amadeus bouncer admin
     # ========================================================
 
-    @admin.command(
+    @bouncer.command(
         name="verify",
         description="Manually verify a user.",
     )
@@ -545,7 +527,7 @@ class BounceAdmin(commands.Cog):
 
         if role is None:
             await interaction.response.send_message(
-                "Set a Verified role first with `/bouncer setup set-role`.",
+                "Set a Verified role first with `/amadeus bouncer set-role`.",
                 ephemeral=True,
             )
             return
@@ -587,7 +569,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @admin.command(
+    @bouncer.command(
         name="unverify",
         description="Manually remove verification from a user.",
     )
@@ -607,7 +589,7 @@ class BounceAdmin(commands.Cog):
 
         if role is None:
             await interaction.response.send_message(
-                "Set a Verified role first with `/bouncer setup set-role`.",
+                "Set a Verified role first with `/amadeus bouncer set-role`.",
                 ephemeral=True,
             )
             return
@@ -649,7 +631,7 @@ class BounceAdmin(commands.Cog):
             ephemeral=True,
         )
 
-    @admin.command(
+    @bouncer.command(
         name="verify-all",
         description="Slowly give the Verified role to all existing members.",
     )
@@ -676,7 +658,7 @@ class BounceAdmin(commands.Cog):
             await interaction.followup.send(
                 (
                     "A Verified role backfill is already running for this server.\n\n"
-                    "Use `/bouncer admin backfill-status` to check progress."
+                    "Use `/amadeus bouncer backfill-status` to check progress."
                 ),
                 ephemeral=True,
             )
@@ -687,7 +669,7 @@ class BounceAdmin(commands.Cog):
 
         if role is None:
             await interaction.followup.send(
-                "Set a Verified role first with `/bouncer setup set-role`.",
+                "Set a Verified role first with `/amadeus bouncer set-role`.",
                 ephemeral=True,
             )
             return
@@ -732,13 +714,13 @@ class BounceAdmin(commands.Cog):
                 "Started the Verified role backfill for this server.\n\n"
                 f"Delay per role add: **{BACKFILL_DELAY_SECONDS} seconds**\n"
                 f"Include bots: **{include_bots}**\n\n"
-                "Use `/bouncer admin backfill-status` to check progress.\n"
-                "Use `/bouncer admin cancel-backfill` to stop it."
+                "Use `/amadeus bouncer backfill-status` to check progress.\n"
+                "Use `/amadeus bouncer cancel-backfill` to stop it."
             ),
             ephemeral=True,
         )
 
-    @admin.command(
+    @bouncer.command(
         name="backfill-status",
         description="Check the Verified role backfill progress.",
     )
@@ -772,7 +754,7 @@ class BounceAdmin(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @admin.command(
+    @bouncer.command(
         name="cancel-backfill",
         description="Cancel the running Verified role backfill.",
     )
@@ -860,7 +842,14 @@ class BounceAdmin(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(BounceAdmin(bot))
+    cog = BounceAdmin(bot)
+    attach_amadeus_subgroup(bot, cog, cog.bouncer)
+
+    try:
+        await bot.add_cog(cog)
+    except Exception:
+        detach_amadeus_subgroup(bot, cog.bouncer.name)
+        raise
 
     # Register the persistent panel view so button clicks work even if the
     # Bouncer user cog is reloaded or temporarily unloaded.

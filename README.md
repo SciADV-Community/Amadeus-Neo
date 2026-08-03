@@ -78,7 +78,7 @@ See each module's documentation for its specific permission requirements.
 
 | Intent | Reason |
 |---|---|
-| Server Members | Required for `/bouncer verify-all` (iterating all guild members) and guild join events |
+| Server Members | Required for `/amadeus bouncer verify-all` (iterating all guild members) and guild join events |
 
 ---
 

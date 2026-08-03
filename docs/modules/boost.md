@@ -60,9 +60,9 @@ Before the emoji collection step, the bot checks available slots. If there aren'
 
 | Command | Description |
 |---|---|
-| `/boost admin start <member> [force] [count]` | Manually start the perks flow; `force: True` skips the active-booster check, and `count` can be `1` or `2` to select the perk tier |
-| `/boost admin remove <member>` | Remove a member's perks (role + emojis) and clear their flow |
-| `/boost admin status <member>` | Inspect any member's flow state and active grant |
+| `/amadeus boost start <member> [force] [count]` | Manually start the perks flow; `force: True` skips the active-booster check, and `count` can be `1` or `2` to select the perk tier |
+| `/amadeus boost remove <member>` | Remove a member's perks (role + emojis) and clear their flow |
+| `/amadeus boost status <member>` | Inspect any member's flow state and active grant |
 
 ## Database
 
@@ -75,7 +75,7 @@ Before the emoji collection step, the bot checks available slots. If there aren'
 ## Troubleshooting
 
 **No DM was sent when a member boosted**
-The bot may have been offline at the time. Use `/boost admin start <member>` to trigger the flow manually.
+The bot may have been offline at the time. Use `/amadeus boost start <member>` to trigger the flow manually.
 
 **Approval buttons don't respond after a restart**
 The module may not be loaded. Confirm `cogs.boost` is in `AMADEUS_COGS` and re-enable the module. The `setup()` function re-registers the persistent button handlers on load.
@@ -84,10 +84,10 @@ The module may not be loaded. Confirm `cogs.boost` is in `AMADEUS_COGS` and re-e
 The server is below Guild Boost Level 2. The icon is saved in the flow data and will be applied on next approval once the server reaches Level 2.
 
 **"Insufficient emoji slots" at approval time**
-Free up emoji slots in Server Settings, then use `/boost admin remove <member>` followed by `/boost admin start <member>` to redo the flow.
+Free up emoji slots in Server Settings, then use `/amadeus boost remove <member>` followed by `/amadeus boost start <member>` to redo the flow.
 
 **Tier was inferred incorrectly**
-The tier is estimated from the guild subscription count delta at the moment of the boost event. Simultaneous boosts from multiple members can cause the inference to be off. Restart the flow with `/boost admin start <member> count: 1` or `/boost admin start <member> count: 2` to select the correct tier.
+The tier is estimated from the guild subscription count delta at the moment of the boost event. Simultaneous boosts from multiple members can cause the inference to be off. Restart the flow with `/amadeus boost start <member> count: 1` or `/amadeus boost start <member> count: 2` to select the correct tier.
 
 **Member says they were denied but wants to try again**
 They can type `boost` in DM with the bot or run `/boost status` in the server. The flow restarts from step 1.

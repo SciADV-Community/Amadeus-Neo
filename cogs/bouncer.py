@@ -240,8 +240,8 @@ class Bouncer(commands.Cog):
                     "This server's bouncer is not fully configured yet.\n\n"
                     "Missing: " + ", ".join(missing) + "\n\n"
                     "An admin can configure this with:\n"
-                    "`/bouncer setup set-role`\n"
-                    "`/bouncer setup set-channel`"
+                    "`/amadeus bouncer set-role`\n"
+                    "`/amadeus bouncer set-channel`"
                 ),
                 ephemeral=True,
             )
@@ -485,7 +485,7 @@ class Bouncer(commands.Cog):
                     guild_id,
                     f"⚠ **Bouncer:** Slow-mode is not set on <#{message.channel.id}>. "
                     "Message deletion is disabled until it is configured. "
-                    "Run `/bouncer setup set-channel` to restore it.",
+                    "Run `/amadeus bouncer set-channel` to restore it.",
                 )
             return
 
@@ -506,7 +506,7 @@ class Bouncer(commands.Cog):
                     guild_id,
                     f"⚠ **Bouncer:** Missing **Manage Messages** permission in <#{message.channel.id}>. "
                     "Cannot delete messages from unverified members. "
-                    "Grant the permission or re-run `/bouncer setup set-channel`.",
+                    "Grant the permission or re-run `/amadeus bouncer set-channel`.",
                 )
 
             try:

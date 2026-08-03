@@ -21,6 +21,43 @@ _ADMIN_CHANNEL_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
 )
 
 
+def get_amadeus_command_group(bot: commands.Bot) -> app_commands.Group:
+    admin_cog = bot.get_cog("AmadeusAdmin")
+
+    if admin_cog is None:
+        raise RuntimeError("AmadeusAdmin must be loaded before module admin cogs.")
+
+    group = getattr(admin_cog, "amadeus", None)
+
+    if not isinstance(group, app_commands.Group):
+        raise RuntimeError("AmadeusAdmin does not expose an /amadeus command group.")
+
+    return group
+
+
+def attach_amadeus_subgroup(
+    bot: commands.Bot,
+    cog: commands.Cog,
+    group: app_commands.Group,
+) -> None:
+    amadeus = get_amadeus_command_group(bot)
+    amadeus.add_command(group)
+    # The group stays bound to its module cog, but should only sync as an
+    # /amadeus child rather than as its own top-level slash command.
+    cog.__cog_app_commands__ = [
+        command for command in cog.__cog_app_commands__ if command is not group
+    ]
+
+
+def detach_amadeus_subgroup(bot: commands.Bot, name: str) -> None:
+    try:
+        amadeus = get_amadeus_command_group(bot)
+    except RuntimeError:
+        return
+
+    amadeus.remove_command(name)
+
+
 def _missing_admin_channel_permissions(channel: discord.TextChannel, member: discord.Member) -> list[str]:
     permissions = channel.permissions_for(member)
     return [
@@ -304,27 +341,27 @@ class AmadeusAdmin(commands.Cog):
         _setup_hints: dict[str, str] = {
             "bouncer": (
                 "**Next steps:**\n"
-                "1. `/bouncer setup set-role <role>` — role granted on verification\n"
-                "2. `/bouncer setup set-channel <channel>` — channel members verify in\n"
-                "3. `/bouncer setup post-panel` — post the verification button"
+                "1. `/amadeus bouncer set-role <role>` — role granted on verification\n"
+                "2. `/amadeus bouncer set-channel <channel>` — channel members verify in\n"
+                "3. `/amadeus bouncer post-panel` — post the verification button"
             ),
             "honeypot": (
                 "**Next steps:**\n"
-                "1. `/honeypot set-channel <channel>` — trap channel\n"
-                "2. `/honeypot set-action <action>` — action taken on anyone who posts\n"
-                "3. *(Optional)* `/honeypot message <message>` — customize the warning message\n"
-                "4. `/honeypot post` — post or update the warning message in the channel"
+                "1. `/amadeus honeypot set-channel <channel>` — trap channel\n"
+                "2. `/amadeus honeypot set-action <action>` — action taken on anyone who posts\n"
+                "3. *(Optional)* `/amadeus honeypot message <message>` — customize the warning message\n"
+                "4. `/amadeus honeypot post` — post or update the warning message in the channel"
             ),
             "boost": (
                 "**Next steps:**\n"
                 "1. `/amadeus set-admin-channel <channel>` — where approval requests are posted\n"
-                "2. The flow starts automatically when a member boosts. Use `/boost admin start <member>` to trigger it manually."
+                "2. The flow starts automatically when a member boosts. Use `/amadeus boost start <member>` to trigger it manually."
             ),
             "activity": (
                 "**Next steps:**\n"
-                "1. `/activity tier add <threshold> <role>` — add at least one milestone\n"
-                "2. *(Optional)* `/activity channel include/exclude` — filter which channels count\n"
-                "3. *(Optional)* `/activity settings cooldown` — adjust message cooldown (default 5s)"
+                "1. `/amadeus activity tier-add <threshold> <role>` — add at least one milestone\n"
+                "2. *(Optional)* `/amadeus activity channel-include` or `channel-exclude` — filter which channels count\n"
+                "3. *(Optional)* `/amadeus activity cooldown` — adjust message cooldown (default 5s)"
             ),
         }
 

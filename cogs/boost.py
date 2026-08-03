@@ -701,7 +701,7 @@ class Boost(commands.Cog):
             flow.data.pop("approval_request_id", None)
             self.flow_store.save(flow)
             await interaction.response.send_message(
-                "⚠ Could not reach the admin alert channel. Ask an admin to run `/boost admin start` to manually trigger the flow.",
+                "⚠ Could not reach the admin alert channel. Ask an admin to run `/amadeus boost start` to manually trigger the flow.",
                 ephemeral=True,
             )
             return
@@ -818,7 +818,7 @@ class Boost(commands.Cog):
 
         if grant is None:
             await interaction.followup.send(
-                "Grant application failed. Check bot permissions and try again via `/boost admin start`.",
+                "Grant application failed. Check bot permissions and try again via `/amadeus boost start`.",
                 ephemeral=True,
             )
             flow.state = S.PENDING

@@ -9,6 +9,7 @@ from amadeus.dm_flow import DmFlowStore
 from amadeus.logging_utils import log
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
+from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
 from cogs.boost import FLOW_TYPE, S, Boost
 
 
@@ -18,9 +19,9 @@ class BoostAdmin(commands.Cog):
 
     Commands:
       /boost status            — member checks their own perk status
-      /boost admin start       — manually start the flow for an existing booster
-      /boost admin remove      — tear down a member's perks and clear their flow
-      /boost admin status      — inspect any member's flow and grant state
+      /amadeus boost start     — manually start the flow for an existing booster
+      /amadeus boost remove    — tear down a member's perks and clear their flow
+      /amadeus boost status    — inspect any member's flow and grant state
     """
 
     boost = app_commands.Group(
@@ -29,10 +30,9 @@ class BoostAdmin(commands.Cog):
         guild_only=True,
     )
 
-    boost_admin = app_commands.Group(
-        name="admin",
+    amadeus_boost = app_commands.Group(
+        name="boost",
         description="Admin commands for the boost module.",
-        parent=boost,
     )
 
     def __init__(self, bot: commands.Bot):
@@ -47,6 +47,7 @@ class BoostAdmin(commands.Cog):
         )
 
     def cog_unload(self):
+        detach_amadeus_subgroup(self.bot, self.amadeus_boost.name)
         self.flow_store.close()
         self.boost_store.close()
         self.module_store.close()
@@ -128,7 +129,7 @@ class BoostAdmin(commands.Cog):
         elif is_active_booster(member):
             embed.description = (
                 "You're boosting but have no active request.\n\n"
-                "An admin can start one for you with `/boost admin start`."
+                "An admin can start one for you with `/amadeus boost start`."
             )
         else:
             embed.description = "You are not currently boosting this server."
@@ -152,10 +153,10 @@ class BoostAdmin(commands.Cog):
                 await cog._send_prompt(interaction.user, flow)
 
     # ========================================================
-    # /boost admin start
+    # /amadeus boost start
     # ========================================================
 
-    @boost_admin.command(
+    @amadeus_boost.command(
         name="start",
         description="Manually start the boost perks flow for a member.",
     )
@@ -222,10 +223,10 @@ class BoostAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /boost admin remove
+    # /amadeus boost remove
     # ========================================================
 
-    @boost_admin.command(
+    @amadeus_boost.command(
         name="remove",
         description="Remove a member's boost perks (role + emojis) and clear any active flow.",
     )
@@ -265,10 +266,10 @@ class BoostAdmin(commands.Cog):
         )
 
     # ========================================================
-    # /boost admin status
+    # /amadeus boost status
     # ========================================================
 
-    @boost_admin.command(
+    @amadeus_boost.command(
         name="status",
         description="Check the boost flow and grant details for any member.",
     )
@@ -317,4 +318,11 @@ class BoostAdmin(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(BoostAdmin(bot))
+    cog = BoostAdmin(bot)
+    attach_amadeus_subgroup(bot, cog, cog.amadeus_boost)
+
+    try:
+        await bot.add_cog(cog)
+    except Exception:
+        detach_amadeus_subgroup(bot, cog.amadeus_boost.name)
+        raise

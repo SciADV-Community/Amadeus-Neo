@@ -157,7 +157,7 @@ class Honeypot(commands.Cog):
                 f"⚠ **Honeypot:** Missing **Manage Messages** permission in <#{config.channel_id}>. "
                 "Could not delete a message from "
                 f"{message.author.mention} (`{message.author}` | `{message.author.id}`). "
-                "Grant the permission or re-run `/honeypot set-channel`.",
+                "Grant the permission or re-run `/amadeus honeypot set-channel`.",
             )
         except discord.HTTPException as e:
             log(

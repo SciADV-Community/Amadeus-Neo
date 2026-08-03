@@ -11,26 +11,26 @@ Trap channel for catching bots and compromised accounts. Any message posted in t
 
 ## Setup
 
-1. `/honeypot set-channel <channel>` — designates the trap channel. The bot checks for **Manage Messages** and **Manage Channel** permissions and reports any that are missing. A 1-minute slow-mode is applied automatically if permissions allow.
-2. `/honeypot set-action <action> [role] [reason] [delete-history]` — choose what happens when someone posts. `reason` is written to the audit log for `mute`, `kick`, and `ban`. `delete-history` can remove the member's recent messages from the last 1, 6, 12, or 24 hours.
-3. `/honeypot enable-alerts <true|false>` — enable alerts to the admin channel (requires `/amadeus set-admin-channel` to be configured).
-4. `/honeypot message <message>` — optionally customizes the warning message used by `/honeypot post`. Messages are capped at 2000 characters and cannot contain URLs.
-5. `/honeypot post` — posts or updates the configured warning message in the honeypot channel. If no custom message is configured, the default warning is used.
+1. `/amadeus honeypot set-channel <channel>` — designates the trap channel. The bot checks for **Manage Messages** and **Manage Channel** permissions and reports any that are missing. A 1-minute slow-mode is applied automatically if permissions allow.
+2. `/amadeus honeypot set-action <action> [role] [reason] [delete-history]` — choose what happens when someone posts. `reason` is written to the audit log for `mute`, `kick`, and `ban`. `delete-history` can remove the member's recent messages from the last 1, 6, 12, or 24 hours.
+3. `/amadeus honeypot enable-alerts <true|false>` — enable alerts to the admin channel (requires `/amadeus set-admin-channel` to be configured).
+4. `/amadeus honeypot message <message>` — optionally customizes the warning message used by `/amadeus honeypot post`. Messages are capped at 2000 characters and cannot contain URLs.
+5. `/amadeus honeypot post` — posts or updates the configured warning message in the honeypot channel. If no custom message is configured, the default warning is used.
 
 > For the remove-role action, the bot role must sit **above** the target role in the server's role hierarchy.
 
 > Members with the configured Amadeus admin role are exempt from honeypot moderation actions. The `AMADEUS_OWNER_ID` user is also protected from honeypot bans.
 
-> The bot's own messages in the honeypot channel are not deleted — this allows `/honeypot post` to display and update the warning message.
+> The bot's own messages in the honeypot channel are not deleted — this allows `/amadeus honeypot post` to display and update the warning message.
 
 ## Configurable Settings
 
 | Command | Options | Description |
 |---|---|---|
-| `/honeypot set-channel` | Any text channel | The channel that triggers the action |
-| `/honeypot set-action` | `remove-role`, `mute`, `kick`, `ban`; optional `reason` for `mute`/`kick`/`ban`; optional `delete-history` of 1, 6, 12, or 24 hours | Action taken on the sender |
-| `/honeypot enable-alerts` | `true` / `false` | Whether to alert the admin channel on each trigger |
-| `/honeypot message` | Plain text, up to 2000 characters, no URLs | Warning message posted by `/honeypot post` |
+| `/amadeus honeypot set-channel` | Any text channel | The channel that triggers the action |
+| `/amadeus honeypot set-action` | `remove-role`, `mute`, `kick`, `ban`; optional `reason` for `mute`/`kick`/`ban`; optional `delete-history` of 1, 6, 12, or 24 hours | Action taken on the sender |
+| `/amadeus honeypot enable-alerts` | `true` / `false` | Whether to alert the admin channel on each trigger |
+| `/amadeus honeypot message` | Plain text, up to 2000 characters, no URLs | Warning message posted by `/amadeus honeypot post` |
 
 **Actions:**
 
@@ -58,7 +58,7 @@ Check the bot's role position. For `remove-role`, the bot role must be above the
 For `remove-role`, `mute`, and `kick`, confirm the bot has **Manage Messages** and can view each channel where messages should be removed. For `ban`, Discord handles the configured deletion window as part of the ban request.
 
 **No alerts are arriving**
-Confirm `/amadeus set-admin-channel` is set and the bot has Send Messages permission in that channel. Verify alerts are enabled with `/honeypot enable-alerts true`.
+Confirm `/amadeus set-admin-channel` is set and the bot has Send Messages permission in that channel. Verify alerts are enabled with `/amadeus honeypot enable-alerts true`.
 
 **Slow-mode wasn't applied / messages aren't being deleted**
-Re-run `/honeypot set-channel` — it will report exactly which permissions are missing. Grant them and run the command again.
+Re-run `/amadeus honeypot set-channel` — it will report exactly which permissions are missing. Grant them and run the command again.

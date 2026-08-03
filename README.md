@@ -16,7 +16,7 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 | [honeypot](docs/modules/honeypot.md) | Honeypot channel moderation. Any user who posts in the configured honeypot channel has their message deleted and receives the configured action: remove role, timeout, kick, or ban. Optional alerts are sent to the admin channel.                  |
 | [boost](docs/modules/boost.md) | Automates server boost perks. Boosters are guided through a DM flow for custom role names, role icons, role colors for double boosts, and emoji suggestions. Requests are sent to the admin channel for approval before roles or emojis are created. |
 | [activity](docs/modules/activity.md) | Assigns roles based on counted message activity. Admins can configure message-count milestones, include/exclude channel filters, and a per-user cooldown to reduce spam farming.                                                                     |
-| [play](docs/modules/play.md) | Creates private Visual Novel playthrough posts in a configured forum channel. Members choose a configured game with `/play`; the bot tags the post, pings the player, and marks the thread as a Spoiler Channel.                                  |
+| [play](docs/modules/play.md) | Creates personal Visual Novel playthrough posts in configured forum channels. Members choose a configured game with `/play`; the bot posts in that game's forum, tags the post, pings the player, and marks the thread as a Spoiler Channel.       |
 
 ### Core bot features:
 

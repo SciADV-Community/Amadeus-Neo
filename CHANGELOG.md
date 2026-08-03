@@ -1,6 +1,10 @@
 # Changelog
 
 ---
+
+### 1.7.1
+- Added per-game forum channel mappings for `/play`, allowing multiple playthrough forums per server.
+
 ### 1.7.0
 - Added the optional `play` module for Visual Novel playthrough forum posts.
 - Added `/play` for members and `/amadeus play` configuration commands for admins.

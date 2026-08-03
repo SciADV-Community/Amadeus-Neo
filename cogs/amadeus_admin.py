@@ -242,6 +242,7 @@ class AmadeusAdmin(commands.Cog):
         module_list = ", ".join(
             f"`{extension_to_module_name(ext)}`"
             for ext in get_configured_cog_extensions()
+            if not ext.endswith("_admin")
         ) or "None configured"
 
         embed = discord.Embed(
@@ -362,6 +363,12 @@ class AmadeusAdmin(commands.Cog):
                 "1. `/amadeus activity tier-add <threshold> <role>` — add at least one milestone\n"
                 "2. *(Optional)* `/amadeus activity channel-include` or `channel-exclude` — filter which channels count\n"
                 "3. *(Optional)* `/amadeus activity cooldown` — adjust message cooldown (default 5s)"
+            ),
+            "play": (
+                "**Next steps:**\n"
+                "1. `/amadeus play set-forum <forum>` — forum where playthrough posts are created\n"
+                "2. `/amadeus play add-game <name>` — add a game and bind or create its forum tag\n"
+                "3. `/amadeus play config` — verify permissions and setup"
             ),
         }
 

@@ -3,6 +3,7 @@ from amadeus.models.bouncer import BounceConfig
 from amadeus.models.dm_flow import DmFlow
 from amadeus.models.guild import GuildConfig
 from amadeus.models.honeypot import HoneypotConfig
+from amadeus.models.play import PlayConfig, PlayGame
 
 __all__ = [
     "BoostGrant",
@@ -10,4 +11,6 @@ __all__ = [
     "DmFlow",
     "GuildConfig",
     "HoneypotConfig",
+    "PlayConfig",
+    "PlayGame",
 ]

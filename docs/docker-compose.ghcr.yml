@@ -16,7 +16,7 @@ services:
     environment:
       DISCORD_TOKEN: "replace-me"
       AMADEUS_OWNER_ID: ""
-      AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
+      AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity,cogs.play"
       AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
       AMADEUS_PRIVACY_POLICY_URL: ""
       AMADEUS_TERMS_OF_SERVICE_URL: ""

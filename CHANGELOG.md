@@ -1,6 +1,12 @@
 # Changelog
 
 ---
+### 1.7.0
+- Added the optional `play` module for Visual Novel playthrough forum posts.
+- Added `/play` for members and `/amadeus play` configuration commands for admins.
+- Added Discord Spoiler Channel support for created forum posts via the raw channel flags API.
+
+---
 ### v1.6.0
 - Moved module admin/config commands under `/amadeus activity`, `/amadeus boost`, `/amadeus bouncer`, and `/amadeus honeypot`.
 - Kept member-facing commands at `/activity status`, `/activity leaderboard`, `/boost status`, `/verify`, and `/code`.

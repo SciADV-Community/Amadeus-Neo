@@ -5,6 +5,8 @@ from cogs.amadeus_admin import AmadeusAdmin
 from cogs.boost_admin import setup as setup_boost_admin
 from cogs.bouncer_admin import setup as setup_bouncer_admin
 from cogs.honeypot_admin import setup as setup_honeypot_admin
+from cogs.play import setup as setup_play
+from cogs.play_admin import setup as setup_play_admin
 
 
 class FakeBot:
@@ -46,10 +48,11 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
         asyncio.run(setup_boost_admin(bot))
         asyncio.run(setup_bouncer_admin(bot))
         asyncio.run(setup_honeypot_admin(bot))
+        asyncio.run(setup_play_admin(bot))
 
         amadeus = bot.get_cog("AmadeusAdmin").amadeus
 
-        assert {"activity", "boost", "bouncer", "honeypot"}.issubset(
+        assert {"activity", "boost", "bouncer", "honeypot", "play"}.issubset(
             command_names(amadeus)
         )
 
@@ -92,6 +95,14 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
             "message",
             "post",
         }
+        assert command_names(amadeus._children["play"]) == {
+            "set-forum",
+            "add-game",
+            "remove-game",
+            "list-games",
+            "archive-duration",
+            "config",
+        }
     finally:
         unload_all(bot)
 
@@ -104,11 +115,15 @@ def test_public_roots_remain_member_facing_only(temp_db_path):
         asyncio.run(setup_boost_admin(bot))
         asyncio.run(setup_bouncer_admin(bot))
         asyncio.run(setup_honeypot_admin(bot))
+        asyncio.run(setup_play(bot))
+        asyncio.run(setup_play_admin(bot))
 
         activity = bot.get_cog("ActivityAdmin")
         boost = bot.get_cog("BoostAdmin")
         bouncer = bot.get_cog("BounceAdmin")
         honeypot = bot.get_cog("HoneypotAdmin")
+        play = bot.get_cog("Play")
+        play_admin = bot.get_cog("PlayAdmin")
 
         assert [command.name for command in activity.__cog_app_commands__] == [
             "activity"
@@ -120,5 +135,8 @@ def test_public_roots_remain_member_facing_only(temp_db_path):
 
         assert bouncer.__cog_app_commands__ == []
         assert honeypot.__cog_app_commands__ == []
+
+        assert [command.name for command in play.__cog_app_commands__] == ["play"]
+        assert play_admin.__cog_app_commands__ == []
     finally:
         unload_all(bot)

@@ -16,6 +16,7 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 | [honeypot](docs/modules/honeypot.md) | Honeypot channel moderation. Any user who posts in the configured honeypot channel has their message deleted and receives the configured action: remove role, timeout, kick, or ban. Optional alerts are sent to the admin channel.                  |
 | [boost](docs/modules/boost.md) | Automates server boost perks. Boosters are guided through a DM flow for custom role names, role icons, role colors for double boosts, and emoji suggestions. Requests are sent to the admin channel for approval before roles or emojis are created. |
 | [activity](docs/modules/activity.md) | Assigns roles based on counted message activity. Admins can configure message-count milestones, include/exclude channel filters, and a per-user cooldown to reduce spam farming.                                                                     |
+| [play](docs/modules/play.md) | Creates private Visual Novel playthrough posts in a configured forum channel. Members choose a configured game with `/play`; the bot tags the post, pings the player, and marks the thread as a Spoiler Channel.                                  |
 
 ### Core bot features:
 
@@ -32,7 +33,7 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 Create the bot application in the Discord Developer Portal, then replace `YOUR_CLIENT_ID` in this URL:
 
 ```text
-https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1103001349142&scope=bot%20applications.commands
+https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1429418863638&scope=bot%20applications.commands
 ```
 
 This invite includes the baseline permissions needed for all current modules:
@@ -42,6 +43,9 @@ This invite includes the baseline permissions needed for all current modules:
 - Embed Links
 - Attach Files
 - Use Application Commands
+- Create Public Threads
+- Send Messages in Threads
+- Manage Threads
 - Manage Roles
 - Manage Emojis and Stickers
 - Manage Channels
@@ -73,6 +77,7 @@ See each module's documentation for its specific permission requirements.
 | [honeypot](docs/modules/honeypot.md) | Manage Channel, Manage Messages, plus permissions for the chosen action |
 | [boost](docs/modules/boost.md) | Manage Roles, Manage Emojis and Stickers |
 | [activity](docs/modules/activity.md) | Manage Roles |
+| [play](docs/modules/play.md) | Manage Channels, Create Public Threads, Send Messages in Threads, Manage Threads |
 
 ### Privileged Gateway Intents
 
@@ -92,7 +97,7 @@ Edit `docker-compose.yml` and set the service `environment:` values:
 environment:
   DISCORD_TOKEN: "your-bot-token"
   AMADEUS_OWNER_ID: "your-discord-user-id"
-  AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity"
+  AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity,cogs.play"
   AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
   AMADEUS_PRIVACY_POLICY_URL: "https://example.com/privacy/"
   AMADEUS_TERMS_OF_SERVICE_URL: "https://example.com/terms/"

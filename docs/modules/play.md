@@ -1,6 +1,6 @@
 # Module: play
 
-Creates Visual Novel playthrough posts in a configured Discord forum channel. Members choose a configured game with `/play`; the bot creates a forum post, applies the matching game tag, pings the member in the starter post, and then marks the thread as a Spoiler Channel.
+Creates Visual Novel playthrough posts in configured Discord forum channels. Members choose a configured game with `/play`; the bot creates a forum post in that game's forum, applies the matching game tag, pings the member in the starter post, and then marks the thread as a Spoiler Channel.
 
 ## Enable / Disable
 
@@ -11,15 +11,24 @@ Creates Visual Novel playthrough posts in a configured Discord forum channel. Me
 
 ## Setup
 
-1. `/amadeus play set-forum <forum>` - set the forum channel where playthrough posts are created.
-2. `/amadeus play add-game <name> [tag_name]` - add a game to `/play`.
-3. `/amadeus play config` - verify the forum, game count, archive duration, and bot permissions.
+1. `/amadeus play set-forum <forum>` - optionally set the default forum used when adding games.
+2. `/amadeus play add-game <name> [forum] [tag_name]` - add a game to `/play` and bind it to a forum channel.
+3. `/amadeus play config` - verify the forums, game count, archive duration, and bot permissions.
 
-`add-game` links an existing forum tag by name. If the tag does not exist, the bot creates it in the configured forum channel. If `tag_name` is omitted, the bot uses the game name as the tag name.
+`add-game` links an existing forum tag by name. If the tag does not exist, the bot creates it in the selected forum channel. If `forum` is omitted, the default forum from `/amadeus play set-forum` is used. If `tag_name` is omitted, the bot uses the game name as the tag name.
+
+Example layout:
+
+| Forum channel | Games |
+|---|---|
+| `Chaos-Head` | `Chaos;Head NoAH`, `Chaos;Child` |
+| `Steins-Gate` | `Steins;Gate`, `Steins;Gate 0`, `Steins;Gate: My Darling's Embrace`, `Steins;Gate Re:Boot` |
+| `Robotics-Notes` | `Robotics;Notes`, `Robotics;Notes DaSH` |
+| `Anonymous-Code` | `Anonymous;Code` |
 
 ## Required Permissions
 
-The bot needs these permissions in the configured forum channel:
+The bot needs these permissions in every configured playthrough forum channel:
 
 - View Channels
 - Send Messages
@@ -42,8 +51,8 @@ The `game` option autocompletes from the server's configured games.
 
 | Command | Description |
 |---|---|
-| `/amadeus play set-forum <forum>` | Set the forum channel used for playthrough posts |
-| `/amadeus play add-game <name> [tag_name]` | Add or update a game and bind it to a forum tag |
+| `/amadeus play set-forum <forum>` | Set the default forum channel used when adding games |
+| `/amadeus play add-game <name> [forum] [tag_name]` | Add or update a game and bind it to a forum channel and tag |
 | `/amadeus play remove-game <game>` | Remove a game from `/play` |
 | `/amadeus play list-games` | List configured games and tag bindings |
 | `/amadeus play archive-duration <minutes>` | Set the auto-archive duration used for new playthrough posts |
@@ -54,11 +63,12 @@ The `game` option autocompletes from the server's configured games.
 ## How It Works
 
 1. Member runs `/play` and picks a configured game.
-2. The bot checks only active guild threads and filters them to the configured forum and selected game tag. If the member already has an active matching post, the bot returns that thread link instead of creating another.
-3. The bot creates a forum post named `<game> | @username`.
-4. The starter post says `<@user> | Spoilers for <game>`, which pings the member before spoiler gating is applied.
-5. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
-6. The bot posts the playthrough guidance message inside the thread.
+2. The bot resolves the game's configured forum and tag.
+3. The bot checks only active guild threads and filters them to that forum and selected game tag. If the member already has an active matching post, the bot returns that thread link instead of creating another.
+4. The bot creates a forum post named `<game> | @username`.
+5. The starter post says `<@user> | Spoilers for <game>`, which pings the member before spoiler gating is applied.
+6. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
+7. The bot posts the playthrough guidance message inside the thread.
 
 The module does not store player sessions in SQLite. Discord forum threads are the source of truth. Archived threads are not queried during normal `/play` usage.
 
@@ -66,16 +76,19 @@ The module does not store player sessions in SQLite. Discord forum threads are t
 
 | Table | Stores |
 |---|---|
-| `play_config` | Per-guild forum channel and optional auto-archive duration |
-| `play_game` | Per-guild game list and forum tag bindings |
+| `play_config` | Per-guild default forum channel and optional auto-archive duration |
+| `play_game` | Per-guild game list, forum channel bindings, and forum tag bindings |
 
 ## Troubleshooting
 
 **`/play` says the game is missing its forum tag**
 The configured tag was deleted or renamed. Re-run `/amadeus play add-game <name>` so the bot can link or recreate the tag.
 
+**`/play` says the game does not have a valid playthrough forum**
+The configured forum was deleted, changed to another channel type, or the game was added before a forum was assigned. Re-run `/amadeus play add-game <name> <forum>`.
+
 **A playthrough post was created and then archived immediately**
-Discord rejected the Spoiler Channel flag update. Check that the bot has Manage Channels and Manage Threads in the configured forum channel.
+Discord rejected the Spoiler Channel flag update. Check that the bot has Manage Channels and Manage Threads in that game's configured forum channel.
 
 **A member can create multiple posts for the same game after an old one archived**
 This is expected. The duplicate check intentionally looks only at active threads so archived forum history does not become an ever-growing lookup path.

@@ -366,8 +366,8 @@ class AmadeusAdmin(commands.Cog):
             ),
             "play": (
                 "**Next steps:**\n"
-                "1. `/amadeus play set-forum <forum>` — forum where playthrough posts are created\n"
-                "2. `/amadeus play add-game <name>` — add a game and bind or create its forum tag\n"
+                "1. `/amadeus play set-forum <forum>` — optional default forum for newly added games\n"
+                "2. `/amadeus play add-game <name> [forum]` — add a game and bind or create its forum tag\n"
                 "3. `/amadeus play config` — verify permissions and setup"
             ),
         }

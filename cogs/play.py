@@ -7,7 +7,7 @@ from discord.ext import commands
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import NO_MENTIONS, escape_untrusted_text
 from amadeus.logging_utils import log
-from amadeus.models.play import PlayConfig, PlayGame
+from amadeus.models.play import PlayGame
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.play_store import PlayStore
 
@@ -120,7 +120,6 @@ def thread_name_matches_player(thread: discord.Thread, member: discord.Member) -
 async def find_active_play_thread(
     guild: discord.Guild,
     forum: discord.ForumChannel,
-    game: PlayGame,
     tag: discord.ForumTag,
     member: discord.Member,
 ) -> discord.Thread | None:
@@ -185,18 +184,18 @@ class Play(commands.Cog):
             for game in self.play_store.search_games(interaction.guild_id, current)
         ]
 
-    async def _get_configured_forum(
+    async def _get_forum_channel(
         self,
         guild: discord.Guild,
-        config: PlayConfig | None,
+        channel_id: int | None,
     ) -> discord.ForumChannel | None:
-        if config is None or config.forum_channel_id is None:
+        if channel_id is None:
             return None
 
-        channel = guild.get_channel(config.forum_channel_id)
+        channel = guild.get_channel(channel_id)
         if channel is None:
             try:
-                channel = await guild.fetch_channel(config.forum_channel_id)
+                channel = await guild.fetch_channel(channel_id)
             except (discord.Forbidden, discord.HTTPException, discord.NotFound):
                 return None
 
@@ -245,19 +244,21 @@ class Play(commands.Cog):
             return
 
         config = self.play_store.get_config(interaction.guild.id)
-        forum = await self._get_configured_forum(interaction.guild, config)
-
-        if forum is None:
-            await interaction.response.send_message(
-                "Playthroughs are not configured yet. Ask an admin to run `/amadeus play set-forum`.",
-                ephemeral=True,
-            )
-            return
-
         play_game = self.play_store.get_game(interaction.guild.id, game)
         if play_game is None:
             await interaction.response.send_message(
                 "That game is not configured for playthroughs on this server.",
+                ephemeral=True,
+            )
+            return
+
+        forum_channel_id = play_game.forum_channel_id or (config.forum_channel_id if config else None)
+        forum = await self._get_forum_channel(interaction.guild, forum_channel_id)
+
+        if forum is None:
+            await interaction.response.send_message(
+                f"**{escape_untrusted_text(play_game.display_name)}** does not have a valid playthrough forum. "
+                "Ask an admin to run `/amadeus play add-game` with a forum channel.",
                 ephemeral=True,
             )
             return
@@ -298,7 +299,6 @@ class Play(commands.Cog):
         existing_thread = await find_active_play_thread(
             interaction.guild,
             forum,
-            play_game,
             tag,
             interaction.user,
         )
@@ -327,7 +327,11 @@ class Play(commands.Cog):
                     replied_user=False,
                 ),
                 applied_tags=[tag],
-                auto_archive_duration=config.auto_archive_duration or discord.utils.MISSING,
+                auto_archive_duration=(
+                    config.auto_archive_duration
+                    if config and config.auto_archive_duration
+                    else discord.utils.MISSING
+                ),
                 reason=f"Playthrough post for {interaction.user} ({interaction.user.id})",
             )
         except discord.Forbidden:

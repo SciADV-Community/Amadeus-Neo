@@ -2,6 +2,7 @@
 Play module storage.
 """
 import re
+import sqlite3
 
 from amadeus.database import BaseStore
 from amadeus.models.play import PlayConfig, PlayGame
@@ -32,15 +33,31 @@ class PlayStore(BaseStore):
         self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS play_game (
-                guild_id     INTEGER NOT NULL,
-                key          TEXT    NOT NULL,
-                display_name TEXT    NOT NULL,
-                forum_tag_id INTEGER,
-                enabled      INTEGER NOT NULL DEFAULT 1,
-                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                guild_id         INTEGER NOT NULL,
+                key              TEXT    NOT NULL,
+                display_name     TEXT    NOT NULL,
+                forum_channel_id INTEGER,
+                forum_tag_id     INTEGER,
+                enabled          INTEGER NOT NULL DEFAULT 1,
+                created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, key)
             )
+            """
+        )
+        try:
+            self.db.execute("ALTER TABLE play_game ADD COLUMN forum_channel_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        self.db.execute(
+            """
+            UPDATE play_game
+            SET forum_channel_id = (
+                SELECT forum_channel_id
+                FROM play_config
+                WHERE play_config.guild_id = play_game.guild_id
+            )
+            WHERE forum_channel_id IS NULL
             """
         )
         self.db.commit()
@@ -105,20 +122,22 @@ class PlayStore(BaseStore):
         self,
         guild_id: int,
         display_name: str,
+        forum_channel_id: int | None,
         forum_tag_id: int | None,
     ) -> PlayGame:
         key = normalize_game_key(display_name)
         self.db.execute(
             """
-            INSERT INTO play_game (guild_id, key, display_name, forum_tag_id, enabled)
-            VALUES (?, ?, ?, ?, 1)
+            INSERT INTO play_game (guild_id, key, display_name, forum_channel_id, forum_tag_id, enabled)
+            VALUES (?, ?, ?, ?, ?, 1)
             ON CONFLICT(guild_id, key) DO UPDATE SET
                 display_name = excluded.display_name,
+                forum_channel_id = excluded.forum_channel_id,
                 forum_tag_id = excluded.forum_tag_id,
                 enabled = 1,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (guild_id, key, display_name.strip(), forum_tag_id),
+            (guild_id, key, display_name.strip(), forum_channel_id, forum_tag_id),
         )
         self.db.commit()
         game = self.get_game(guild_id, key, enabled_only=False)
@@ -144,7 +163,7 @@ class PlayStore(BaseStore):
         enabled_clause = "AND enabled = 1" if enabled_only else ""
         row = self.db.execute(
             f"""
-            SELECT guild_id, key, display_name, forum_tag_id, enabled
+            SELECT guild_id, key, display_name, forum_channel_id, forum_tag_id, enabled
             FROM play_game
             WHERE guild_id = ? AND key = ?
             {enabled_clause}
@@ -159,6 +178,7 @@ class PlayStore(BaseStore):
             guild_id=row["guild_id"],
             key=row["key"],
             display_name=row["display_name"],
+            forum_channel_id=row["forum_channel_id"],
             forum_tag_id=row["forum_tag_id"],
             enabled=bool(row["enabled"]),
         )
@@ -167,7 +187,7 @@ class PlayStore(BaseStore):
         enabled_clause = "AND enabled = 1" if enabled_only else ""
         rows = self.db.execute(
             f"""
-            SELECT guild_id, key, display_name, forum_tag_id, enabled
+            SELECT guild_id, key, display_name, forum_channel_id, forum_tag_id, enabled
             FROM play_game
             WHERE guild_id = ?
             {enabled_clause}
@@ -180,6 +200,7 @@ class PlayStore(BaseStore):
                 guild_id=row["guild_id"],
                 key=row["key"],
                 display_name=row["display_name"],
+                forum_channel_id=row["forum_channel_id"],
                 forum_tag_id=row["forum_tag_id"],
                 enabled=bool(row["enabled"]),
             )

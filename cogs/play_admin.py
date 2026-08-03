@@ -81,19 +81,29 @@ class PlayAdmin(commands.Cog):
             for game in self.play_store.search_games(interaction.guild_id, current)
         ]
 
-    async def _get_configured_forum(self, guild: discord.Guild) -> discord.ForumChannel | None:
-        config = self.play_store.get_config(guild.id)
-        if config is None or config.forum_channel_id is None:
+    async def _get_forum_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int | None,
+    ) -> discord.ForumChannel | None:
+        if channel_id is None:
             return None
 
-        channel = guild.get_channel(config.forum_channel_id)
+        channel = guild.get_channel(channel_id)
         if channel is None:
             try:
-                channel = await guild.fetch_channel(config.forum_channel_id)
+                channel = await guild.fetch_channel(channel_id)
             except (discord.Forbidden, discord.HTTPException, discord.NotFound):
                 return None
 
         return channel if isinstance(channel, discord.ForumChannel) else None
+
+    async def _get_default_forum(self, guild: discord.Guild) -> discord.ForumChannel | None:
+        config = self.play_store.get_config(guild.id)
+        return await self._get_forum_channel(
+            guild,
+            config.forum_channel_id if config else None,
+        )
 
     # ========================================================
     # /amadeus play set-forum
@@ -101,9 +111,9 @@ class PlayAdmin(commands.Cog):
 
     @play.command(
         name="set-forum",
-        description="Set the forum channel used for playthrough posts.",
+        description="Set the default forum channel used when adding games.",
     )
-    @app_commands.describe(channel="Forum channel where playthrough posts should be created.")
+    @app_commands.describe(channel="Default forum channel for newly added games.")
     async def play_set_forum(
         self,
         interaction: discord.Interaction,
@@ -131,7 +141,7 @@ class PlayAdmin(commands.Cog):
                 warning = f"\n\nMissing permissions in {channel.mention}: {needed}."
 
         await interaction.response.send_message(
-            f"Playthrough forum set to {channel.mention}.{warning}",
+            f"Default playthrough forum set to {channel.mention}.{warning}",
             ephemeral=True,
         )
 
@@ -145,12 +155,14 @@ class PlayAdmin(commands.Cog):
     )
     @app_commands.describe(
         name="Game name shown to users.",
+        forum="Forum channel for this game. Defaults to `/amadeus play set-forum`.",
         tag_name="Forum tag to use. Defaults to the game name.",
     )
     async def play_add_game(
         self,
         interaction: discord.Interaction,
         name: str,
+        forum: discord.ForumChannel | None = None,
         tag_name: str | None = None,
     ) -> None:
         config = await require_amadeus_access(interaction, self.module_store)
@@ -163,10 +175,10 @@ class PlayAdmin(commands.Cog):
             await interaction.response.send_message(error, ephemeral=True)
             return
 
-        forum = await self._get_configured_forum(interaction.guild)
+        forum = forum or await self._get_default_forum(interaction.guild)
         if forum is None:
             await interaction.response.send_message(
-                "Set a playthrough forum first with `/amadeus play set-forum`.",
+                "Choose a **forum** for this game or set a default first with `/amadeus play set-forum`.",
                 ephemeral=True,
             )
             return
@@ -201,9 +213,10 @@ class PlayAdmin(commands.Cog):
                 )
                 return
 
-        game = self.play_store.save_game(interaction.guild.id, name, tag.id)
+        game = self.play_store.save_game(interaction.guild.id, name, forum.id, tag.id)
         log(
-            f"PLAY // GAME SAVED 『 {game.key} 』 TAG 『 {tag.id} 』 GUILD 『 {interaction.guild.id} 』",
+            f"PLAY // GAME SAVED 『 {game.key} 』 FORUM 『 {forum.id} 』 TAG 『 {tag.id} 』 "
+            f"GUILD 『 {interaction.guild.id} 』",
             level="debug",
             logger_name="play",
         )
@@ -211,7 +224,7 @@ class PlayAdmin(commands.Cog):
         tag_note = "created and linked" if tag_created else "linked"
         await interaction.response.send_message(
             f"Added **{escape_untrusted_text(game.display_name)}** to `/play`; "
-            f"forum tag **{escape_untrusted_text(tag.name)}** {tag_note}.",
+            f"forum {forum.mention}; tag **{escape_untrusted_text(tag.name)}** {tag_note}.",
             ephemeral=True,
         )
 
@@ -268,7 +281,8 @@ class PlayAdmin(commands.Cog):
             return
 
         games = self.play_store.list_games(interaction.guild.id)
-        forum = await self._get_configured_forum(interaction.guild)
+        play_config = self.play_store.get_config(interaction.guild.id)
+        default_forum_id = play_config.forum_channel_id if play_config else None
 
         if not games:
             await interaction.response.send_message(
@@ -279,6 +293,13 @@ class PlayAdmin(commands.Cog):
 
         lines = []
         for game in games:
+            forum_id = game.forum_channel_id or default_forum_id
+            forum = await self._get_forum_channel(interaction.guild, forum_id)
+            if forum is None:
+                forum_text = f"Missing forum `{forum_id}`" if forum_id else "No forum"
+            else:
+                forum_text = f"Forum: {forum.mention}"
+
             tag_text = "No tag"
             if forum is not None:
                 tag = find_forum_tag(forum, tag_id=game.forum_tag_id)
@@ -286,7 +307,9 @@ class PlayAdmin(commands.Cog):
             elif game.forum_tag_id is not None:
                 tag_text = f"Tag ID: `{game.forum_tag_id}`"
 
-            lines.append(f"**{escape_untrusted_text(game.display_name)}** — {tag_text}")
+            lines.append(
+                f"**{escape_untrusted_text(game.display_name)}** — {forum_text} — {tag_text}"
+            )
 
         embed = discord.Embed(
             title="Playthrough Games",
@@ -349,9 +372,16 @@ class PlayAdmin(commands.Cog):
             return
 
         play_config = self.play_store.get_config(interaction.guild.id)
-        forum = await self._get_configured_forum(interaction.guild)
+        default_forum = await self._get_default_forum(interaction.guild)
         games = self.play_store.list_games(interaction.guild.id)
         enabled = self.module_store.is_module_enabled(interaction.guild.id, MODULE_NAME)
+        configured_forum_ids = {
+            game.forum_channel_id
+            for game in games
+            if game.forum_channel_id is not None
+        }
+        if play_config and play_config.forum_channel_id is not None:
+            configured_forum_ids.add(play_config.forum_channel_id)
 
         embed = discord.Embed(
             title="Playthrough Configuration",
@@ -363,8 +393,8 @@ class PlayAdmin(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="Forum",
-            value=forum.mention if forum is not None else "Not configured",
+            name="Default forum",
+            value=default_forum.mention if default_forum is not None else "Not configured",
             inline=True,
         )
         embed.add_field(
@@ -377,15 +407,31 @@ class PlayAdmin(commands.Cog):
             value=str(len(games)),
             inline=True,
         )
+        embed.add_field(
+            name="Forums",
+            value=str(len(configured_forum_ids)),
+            inline=True,
+        )
 
         bot_member = interaction.guild.me
-        if forum is not None and bot_member is not None:
-            missing_permissions = missing_play_forum_permissions(forum, bot_member)
-            permission_text = (
-                "All required permissions present."
-                if not missing_permissions
-                else "\n".join(f"- {permission}" for permission in missing_permissions)
-            )
+        if configured_forum_ids and bot_member is not None:
+            permission_lines = []
+            for forum_id in sorted(configured_forum_ids):
+                forum = await self._get_forum_channel(interaction.guild, forum_id)
+                if forum is None:
+                    permission_lines.append(f"`{forum_id}`: missing or not a forum")
+                    continue
+
+                missing_permissions = missing_play_forum_permissions(forum, bot_member)
+                permission_lines.append(
+                    f"{forum.mention}: OK"
+                    if not missing_permissions
+                    else f"{forum.mention}: missing {', '.join(missing_permissions)}"
+                )
+
+            permission_text = "\n".join(permission_lines[:10])
+            if len(permission_lines) > 10:
+                permission_text += f"\n...and {len(permission_lines) - 10} more."
             embed.add_field(name="Forum permissions", value=permission_text, inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)

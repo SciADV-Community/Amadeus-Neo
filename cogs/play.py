@@ -15,6 +15,7 @@ MODULE_NAME = "play"
 SPOILER_CHANNEL_FLAG = 1 << 21
 MAX_PLAY_THREAD_NAME_LENGTH = 100
 MAX_GAME_NAME_LENGTH = 80
+MAX_FORUM_THREAD_TAGS = 5
 INTRO_MESSAGE_TEMPLATE = (
     "This channel is your personal {kind} channel for {game}. "
     "Upon completion the channel will automatically archive itself.\n"
@@ -112,14 +113,63 @@ def thread_has_tag(thread: discord.Thread, tag_id: int) -> bool:
     return any(tag.id == tag_id for tag in thread.applied_tags)
 
 
+def additional_spoiler_tags(
+    forum: discord.ForumChannel,
+    required_tag: discord.ForumTag,
+) -> list[discord.ForumTag]:
+    return [
+        tag
+        for tag in forum.available_tags
+        if tag.id != required_tag.id
+    ]
+
+
+def resolve_additional_spoiler_tags(
+    forum: discord.ForumChannel,
+    required_tag: discord.ForumTag,
+    selected_tag_ids: list[int],
+) -> tuple[list[discord.ForumTag], str | None]:
+    max_additional_tags = MAX_FORUM_THREAD_TAGS - 1
+    if len(selected_tag_ids) > max_additional_tags:
+        return [], f"Select at most **{max_additional_tags}** additional spoiler tags."
+
+    resolved: list[discord.ForumTag] = []
+    seen_ids = {required_tag.id}
+
+    for tag_id in selected_tag_ids:
+        if tag_id in seen_ids:
+            if tag_id == required_tag.id:
+                return [], "The selected game tag is applied automatically and cannot be selected again."
+            continue
+
+        tag = forum.get_tag(tag_id)
+        if tag is None:
+            return [], "One of the selected spoiler tags is no longer available. Run `/play` again."
+
+        resolved.append(tag)
+        seen_ids.add(tag.id)
+
+    return resolved, None
+
+
 def thread_name_matches_player(thread: discord.Thread, member: discord.Member) -> bool:
     suffix = f" | @{_clean_thread_name_part(member.display_name)}".casefold()
     return thread.name.casefold().endswith(suffix)
 
 
+def thread_name_matches_playthrough(
+    thread: discord.Thread,
+    game: PlayGame,
+    member: discord.Member,
+) -> bool:
+    expected_name = format_play_thread_name(game.display_name, member).casefold()
+    return thread.name.casefold() == expected_name
+
+
 async def find_active_play_thread(
     guild: discord.Guild,
     forum: discord.ForumChannel,
+    game: PlayGame,
     tag: discord.ForumTag,
     member: discord.Member,
 ) -> discord.Thread | None:
@@ -130,14 +180,7 @@ async def find_active_play_thread(
             continue
         if not thread_has_tag(thread, tag.id):
             continue
-        if thread_name_matches_player(thread, member):
-            return thread
-
-        starter_message = thread.starter_message
-        if starter_message is not None and (
-            member.mention in starter_message.content
-            or f"<@!{member.id}>" in starter_message.content
-        ):
+        if thread_name_matches_playthrough(thread, game, member):
             return thread
 
     return None
@@ -153,6 +196,107 @@ def missing_play_forum_permissions(
         for attr, label in _PLAY_FORUM_REQUIRED_PERMS
         if not getattr(permissions, attr)
     ]
+
+
+class _AdditionalSpoilerSelect(discord.ui.Select):
+    def __init__(self, tags: list[discord.ForumTag]) -> None:
+        options = [
+            discord.SelectOption(
+                label=tag.name or f"Tag {tag.id}",
+                value=str(tag.id),
+            )
+            for tag in tags
+        ]
+        super().__init__(
+            placeholder="Additional spoiler tags",
+            min_values=0,
+            max_values=min(MAX_FORUM_THREAD_TAGS - 1, len(options)),
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, _PlaySpoilerTagView):
+            view.selected_tag_ids = [int(value) for value in self.values]
+        await interaction.response.defer()
+
+
+class _PlaySpoilerTagView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "Play",
+        requester_id: int,
+        guild_id: int,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.forum = forum
+        self.play_game = play_game
+        self.required_tag = required_tag
+        self.replay = replay
+        self.auto_archive_duration = auto_archive_duration
+        self.selected_tag_ids: list[int] = []
+
+        selectable_tags = additional_spoiler_tags(forum, required_tag)
+        if selectable_tags:
+            self.add_item(_AdditionalSpoilerSelect(selectable_tags))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this playthrough can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This playthrough setup is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Create", style=discord.ButtonStyle.success, row=1)
+    async def create(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Creating your playthrough post...",
+            view=None,
+        )
+        self.stop()
+        await self.cog.create_playthrough_thread(
+            interaction,
+            forum=self.forum,
+            play_game=self.play_game,
+            required_tag=self.required_tag,
+            selected_tag_ids=self.selected_tag_ids,
+            replay=self.replay,
+            auto_archive_duration=self.auto_archive_duration,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Playthrough creation cancelled.",
+            view=None,
+        )
+        self.stop()
 
 
 class Play(commands.Cog):
@@ -214,6 +358,143 @@ class Play(commands.Cog):
                 level="warning",
                 logger_name="play",
             )
+
+    async def create_playthrough_thread(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        selected_tag_ids: list[int],
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.edit_original_response(
+                content="This can only be used inside a server.",
+                view=None,
+            )
+            return
+
+        extra_tags, error = resolve_additional_spoiler_tags(
+            forum,
+            required_tag,
+            selected_tag_ids,
+        )
+        if error is not None:
+            await interaction.edit_original_response(content=error, view=None)
+            return
+
+        existing_thread = await find_active_play_thread(
+            interaction.guild,
+            forum,
+            play_game,
+            required_tag,
+            interaction.user,
+        )
+        if existing_thread is not None:
+            await interaction.edit_original_response(
+                content=(
+                    f"You already have an active **{escape_untrusted_text(play_game.display_name)}** "
+                    f"playthrough post: {existing_thread.mention}"
+                ),
+                view=None,
+            )
+            return
+
+        safe_game_name = escape_untrusted_text(play_game.display_name)
+        replay_note = " (replay)" if replay else ""
+        thread_name = format_play_thread_name(play_game.display_name, interaction.user)
+        spoiler_names = [safe_game_name] + [
+            escape_untrusted_text(tag.name)
+            for tag in extra_tags
+        ]
+        starter_content = f"{interaction.user.mention} | Spoilers for {', '.join(spoiler_names)}{replay_note}"
+
+        try:
+            result = await forum.create_thread(
+                name=thread_name,
+                content=starter_content,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False,
+                    users=[interaction.user],
+                    roles=False,
+                    replied_user=False,
+                ),
+                applied_tags=[required_tag, *extra_tags],
+                auto_archive_duration=auto_archive_duration or discord.utils.MISSING,
+                reason=f"Playthrough post for {interaction.user} ({interaction.user.id})",
+            )
+        except discord.Forbidden:
+            await interaction.edit_original_response(
+                content=(
+                    f"I could not create a playthrough post in {forum.mention}. "
+                    "Check my forum channel permissions."
+                ),
+                view=None,
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.edit_original_response(
+                content=f"Discord rejected the playthrough post request: `{e}`",
+                view=None,
+            )
+            return
+
+        thread = result.thread
+
+        try:
+            await mark_thread_spoiler(
+                thread,
+                reason=f"Mark playthrough post as spoiler for {interaction.user} ({interaction.user.id})",
+            )
+        except discord.Forbidden:
+            await self._archive_failed_thread(thread)
+            await interaction.edit_original_response(
+                content=(
+                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
+                    "so I archived it. Check my Manage Channels and Manage Threads permissions."
+                ),
+                view=None,
+            )
+            return
+        except discord.HTTPException as e:
+            await self._archive_failed_thread(thread)
+            await interaction.edit_original_response(
+                content=(
+                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
+                    f"so I archived it.\n\nError: `{e}`"
+                ),
+                view=None,
+            )
+            return
+
+        kind = "replay playthrough" if replay else "playthrough"
+        try:
+            await thread.send(
+                INTRO_MESSAGE_TEMPLATE.format(kind=kind, game=safe_game_name),
+                allowed_mentions=NO_MENTIONS,
+            )
+        except discord.HTTPException as e:
+            log(
+                f"PLAY // INTRO MESSAGE FAILED 『 THREAD {thread.id} 』 GUILD 『 {interaction.guild.id} 』 // {e}",
+                level="debug",
+                logger_name="play",
+            )
+
+        log(
+            f"PLAY // THREAD CREATED 『 THREAD {thread.id} 』 GAME 『 {play_game.key} 』 "
+            f"USER 『 {interaction.user.id} 』 GUILD 『 {interaction.guild.id} 』 "
+            f"REPLAY {replay} EXTRA_TAGS {[tag.id for tag in extra_tags]}",
+            level="debug",
+            logger_name="play",
+        )
+
+        await interaction.edit_original_response(
+            content=f"Created your **{safe_game_name}** playthrough post: {thread.mention}",
+            view=None,
+        )
 
     @app_commands.command(
         name="play",
@@ -299,6 +580,7 @@ class Play(commands.Cog):
         existing_thread = await find_active_play_thread(
             interaction.guild,
             forum,
+            play_game,
             tag,
             interaction.user,
         )
@@ -312,90 +594,31 @@ class Play(commands.Cog):
             return
 
         safe_game_name = escape_untrusted_text(play_game.display_name)
-        replay_note = " (replay)" if replay else ""
-        thread_name = format_play_thread_name(play_game.display_name, interaction.user)
-        starter_content = f"{interaction.user.mention} | Spoilers for {safe_game_name}{replay_note}"
-
-        try:
-            result = await forum.create_thread(
-                name=thread_name,
-                content=starter_content,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False,
-                    users=[interaction.user],
-                    roles=False,
-                    replied_user=False,
-                ),
-                applied_tags=[tag],
-                auto_archive_duration=(
-                    config.auto_archive_duration
-                    if config and config.auto_archive_duration
-                    else discord.utils.MISSING
-                ),
-                reason=f"Playthrough post for {interaction.user} ({interaction.user.id})",
-            )
-        except discord.Forbidden:
-            await interaction.edit_original_response(
-                content=(
-                    f"I could not create a playthrough post in {forum.mention}. "
-                    "Check my forum channel permissions."
-                )
-            )
-            return
-        except discord.HTTPException as e:
-            await interaction.edit_original_response(
-                content=f"Discord rejected the playthrough post request: `{e}`"
-            )
-            return
-
-        thread = result.thread
-
-        try:
-            await mark_thread_spoiler(
-                thread,
-                reason=f"Mark playthrough post as spoiler for {interaction.user} ({interaction.user.id})",
-            )
-        except discord.Forbidden:
-            await self._archive_failed_thread(thread)
-            await interaction.edit_original_response(
-                content=(
-                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
-                    "so I archived it. Check my Manage Channels and Manage Threads permissions."
-                )
-            )
-            return
-        except discord.HTTPException as e:
-            await self._archive_failed_thread(thread)
-            await interaction.edit_original_response(
-                content=(
-                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
-                    f"so I archived it.\n\nError: `{e}`"
-                )
-            )
-            return
-
-        kind = "replay playthrough" if replay else "playthrough"
-        try:
-            await thread.send(
-                INTRO_MESSAGE_TEMPLATE.format(kind=kind, game=safe_game_name),
-                allowed_mentions=NO_MENTIONS,
-            )
-        except discord.HTTPException as e:
-            log(
-                f"PLAY // INTRO MESSAGE FAILED 『 THREAD {thread.id} 』 GUILD 『 {interaction.guild.id} 』 // {e}",
-                level="debug",
-                logger_name="play",
-            )
-
-        log(
-            f"PLAY // THREAD CREATED 『 THREAD {thread.id} 』 GAME 『 {play_game.key} 』 "
-            f"USER 『 {interaction.user.id} 』 GUILD 『 {interaction.guild.id} 』 REPLAY {replay}",
-            level="debug",
-            logger_name="play",
+        view = _PlaySpoilerTagView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            forum=forum,
+            play_game=play_game,
+            required_tag=tag,
+            replay=replay,
+            auto_archive_duration=(
+                config.auto_archive_duration
+                if config and config.auto_archive_duration
+                else None
+            ),
         )
-
+        tag_note = (
+            f"\n\nThe **{escape_untrusted_text(tag.name)}** tag will be applied automatically."
+            if tag.name
+            else ""
+        )
         await interaction.edit_original_response(
-            content=f"Created your **{safe_game_name}** playthrough post: {thread.mention}"
+            content=(
+                f"Would you like to include any additional spoilers in this channel "
+                f"for **{safe_game_name}**?{tag_note}"
+            ),
+            view=view,
         )
 
 

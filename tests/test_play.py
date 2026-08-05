@@ -3,15 +3,19 @@ from types import SimpleNamespace
 
 from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, tag_name_error
 from cogs.play import (
+    MAX_FORUM_THREAD_TAGS,
     SPOILER_CHANNEL_FLAG,
+    additional_spoiler_tags,
     calculate_spoiler_flags,
     find_forum_tag,
     format_play_thread_name,
     game_name_error,
     mark_thread_spoiler,
     missing_play_forum_permissions,
+    resolve_additional_spoiler_tags,
     thread_has_tag,
     thread_name_matches_player,
+    thread_name_matches_playthrough,
 )
 
 
@@ -76,10 +80,58 @@ def test_forum_tag_helpers_match_by_id_or_case_insensitive_name():
     assert thread_has_tag(thread, 20) is False
 
 
+def test_additional_spoiler_tags_excludes_required_game_tag():
+    gate = SimpleNamespace(id=10, name="Steins;Gate")
+    zero = SimpleNamespace(id=20, name="Steins;Gate 0")
+    chaos = SimpleNamespace(id=30, name="Chaos;Head")
+    forum = FakeForum([gate, zero, chaos], SimpleNamespace())
+
+    assert additional_spoiler_tags(forum, gate) == [zero, chaos]
+
+
+def test_resolve_additional_spoiler_tags_validates_ids_and_limit():
+    gate = SimpleNamespace(id=10, name="Steins;Gate")
+    tags = [gate] + [
+        SimpleNamespace(id=20 + index, name=f"Tag {index}")
+        for index in range(MAX_FORUM_THREAD_TAGS)
+    ]
+    forum = FakeForum(tags, SimpleNamespace())
+
+    resolved, error = resolve_additional_spoiler_tags(forum, gate, [20, 21])
+    assert error is None
+    assert [tag.id for tag in resolved] == [20, 21]
+
+    resolved, error = resolve_additional_spoiler_tags(forum, gate, [10])
+    assert resolved == []
+    assert error == "The selected game tag is applied automatically and cannot be selected again."
+
+    resolved, error = resolve_additional_spoiler_tags(forum, gate, [999])
+    assert resolved == []
+    assert error == "One of the selected spoiler tags is no longer available. Run `/play` again."
+
+    resolved, error = resolve_additional_spoiler_tags(
+        forum,
+        gate,
+        [20 + index for index in range(MAX_FORUM_THREAD_TAGS)],
+    )
+    assert resolved == []
+    assert error == "Select at most **4** additional spoiler tags."
+
+
 def test_thread_name_player_match_is_case_insensitive():
     member = SimpleNamespace(display_name="Zips")
     thread = SimpleNamespace(name="Steins;Gate | @zips")
     assert thread_name_matches_player(thread, member) is True
+
+
+def test_thread_name_playthrough_match_requires_the_selected_game():
+    member = SimpleNamespace(display_name="Zips")
+    gate = SimpleNamespace(display_name="Steins;Gate")
+    zero = SimpleNamespace(display_name="Steins;Gate 0")
+    thread = SimpleNamespace(name="Steins;Gate | @Zips")
+
+    assert thread_name_matches_playthrough(thread, gate, member) is True
+    assert thread_name_matches_playthrough(thread, zero, member) is False
 
 
 def test_missing_play_forum_permissions_lists_only_missing_permissions():

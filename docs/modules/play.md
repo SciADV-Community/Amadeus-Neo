@@ -1,6 +1,6 @@
 # Module: play
 
-Creates Visual Novel playthrough posts in configured Discord forum channels. Members choose a configured game with `/play`; the bot creates a forum post in that game's forum, applies the matching game tag, pings the member in the starter post, and then marks the thread as a Spoiler Channel.
+Creates Visual Novel playthrough posts in configured Discord forum channels. Members choose a configured game with `/play`; the bot asks whether to include additional spoiler tags, creates a forum post in that game's forum, applies the matching game tag plus selected extra tags, pings the member in the starter post, and then marks the thread as a Spoiler Channel.
 
 ## Enable / Disable
 
@@ -15,7 +15,7 @@ Creates Visual Novel playthrough posts in configured Discord forum channels. Mem
 2. `/amadeus play add-game <name> [forum] [tag_name]` - add a game to `/play` and bind it to a forum channel.
 3. `/amadeus play config` - verify the forums, game count, archive duration, and bot permissions.
 
-`add-game` links an existing forum tag by name. If the tag does not exist, the bot creates it in the selected forum channel. If `forum` is omitted, the default forum from `/amadeus play set-forum` is used. If `tag_name` is omitted, the bot uses the game name as the tag name.
+`add-game` links an existing forum tag by name. If the tag does not exist, the bot creates it in the selected forum channel. If `forum` is omitted, the default forum from `/amadeus play set-forum` is used. If `tag_name` is omitted, the bot uses the game name as the tag name. Discord forum tag names are limited to 20 characters, so longer game names need an explicit shorter `tag_name`.
 
 Example layout:
 
@@ -45,7 +45,7 @@ The bot needs these permissions in every configured playthrough forum channel:
 |---|---|
 | `/play <game> [replay]` | Create a personal playthrough post for a configured game |
 
-The `game` option autocompletes from the server's configured games.
+The `game` option autocompletes from the server's configured games. After the command is submitted, the bot shows an ephemeral multi-select for additional spoiler tags from that game's forum. The tag that directly matches the selected game is applied automatically and is not selectable.
 
 ## Admin Commands
 
@@ -65,10 +65,12 @@ The `game` option autocompletes from the server's configured games.
 1. Member runs `/play` and picks a configured game.
 2. The bot resolves the game's configured forum and tag.
 3. The bot checks only active guild threads and filters them to that forum and selected game tag. If the member already has an active matching post, the bot returns that thread link instead of creating another.
-4. The bot creates a forum post named `<game> | @username`.
-5. The starter post says `<@user> | Spoilers for <game>`, which pings the member before spoiler gating is applied.
-6. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
-7. The bot posts the playthrough guidance message inside the thread.
+4. The bot asks, "Would you like to include any additional spoilers in this channel?" and shows a multi-select of the forum's other tags.
+5. The member picks up to four additional tags, or skips the select and clicks **Create**.
+6. The bot creates a forum post named `<game> | @username`.
+7. The starter post says `<@user> | Spoilers for <game>` plus any selected spoiler tags, which pings the member before spoiler gating is applied.
+8. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
+9. The bot posts the playthrough guidance message inside the thread.
 
 The module does not store player sessions in SQLite. Discord forum threads are the source of truth. Archived threads are not queried during normal `/play` usage.
 

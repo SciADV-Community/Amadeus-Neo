@@ -2,6 +2,9 @@
 
 ---
 
+### 1.7.2
+- Added an ephemeral additional spoiler tag picker to `/play`.
+
 ### 1.7.1
 - Added per-game forum channel mappings for `/play`, allowing multiple playthrough forums per server.
 

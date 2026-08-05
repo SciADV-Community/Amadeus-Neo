@@ -2,6 +2,10 @@
 
 ---
 
+### 1.7.4
+- Fixed `/amadeus play` admin commands bypassing the server's module-enabled check
+- Fixed `/amadeus play set-forum` incorrectly warning that forum posts require Create Public Threads
+
 ### 1.7.3
 - Fixed `/play` creating duplicate playthroughs if a nickname changes
   - Duplicate check also checks the player ID in the starting post

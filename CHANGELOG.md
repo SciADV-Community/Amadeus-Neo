@@ -1,6 +1,29 @@
 # Changelog
 
 ---
+
+### 1.7.3
+- Fixed `/play` creating duplicate playthroughs if a nickname changes
+  - Duplicate check also checks the player ID in the starting post
+- Fixed active thread lookup failures triggering "no existing post". It will now just fail, which is preferable
+- Fixed race condition for `/play` when concurrent instances run for the same game, bypassing duplicate check
+- Fixed missed spoiler tag matches when Discord returned applied tags as raw IDs
+- Fixed the additional spoiler tag picker leaving live buttons behind after it expired.
+  - The prompt now reports that setup timed out
+- Fixed an issue where people could use `/play` to make posts in forums they cannot see or post in
+
+### 1.7.2
+- Added an ephemeral additional spoiler tag picker to `/play`.
+
+### 1.7.1
+- Added per-game forum channel mappings for `/play`, allowing multiple playthrough forums per server.
+
+### 1.7.0
+- Added the optional `play` module for Visual Novel playthrough forum posts.
+- Added `/play` for members and `/amadeus play` configuration commands for admins.
+- Added Discord Spoiler Channel support for created forum posts via the raw channel flags API.
+
+---
 ### v1.6.0
 - Moved module admin/config commands under `/amadeus activity`, `/amadeus boost`, `/amadeus bouncer`, and `/amadeus honeypot`.
 - Kept member-facing commands at `/activity status`, `/activity leaderboard`, `/boost status`, `/verify`, and `/code`.

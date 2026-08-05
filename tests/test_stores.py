@@ -1,4 +1,5 @@
 from datetime import timedelta
+import sqlite3
 
 import discord
 
@@ -8,6 +9,7 @@ from amadeus.bouncer_config import BounceConfigStore
 from amadeus.dm_flow import DmFlowStore
 from amadeus.models.boost import BoostGrant
 from amadeus.models.dm_flow import DmFlow
+from amadeus.play_store import PlayStore, normalize_game_key
 
 
 def test_bouncer_config_defaults_and_setters_persist(temp_db_path):
@@ -167,5 +169,95 @@ def test_boost_store_tracks_subscription_count_and_grant_lifecycle(temp_db_path)
 
         store.delete_grant(1, 2)
         assert store.get_grant(1, 2) is None
+    finally:
+        store.close()
+
+
+def test_play_store_tracks_config_and_games(temp_db_path):
+    store = PlayStore()
+    try:
+        assert store.get_config(1) is None
+        assert store.ensure_config(1).forum_channel_id is None
+
+        store.set_forum_channel(1, 100)
+        store.set_auto_archive_duration(1, 1440)
+        config = store.get_config(1)
+        assert config.forum_channel_id == 100
+        assert config.auto_archive_duration == 1440
+
+        gate = store.save_game(1, "Steins;Gate", 100, 200)
+        zero = store.save_game(1, "Steins;Gate 0", 101, 201)
+        assert gate.key == "steins;gate"
+        assert gate.forum_channel_id == 100
+        assert zero.key == "steins;gate 0"
+        assert zero.forum_channel_id == 101
+
+        updated = store.save_game(1, "steins;gate", 102, 202)
+        assert updated.display_name == "steins;gate"
+        assert updated.forum_channel_id == 102
+        assert updated.forum_tag_id == 202
+        assert store.get_game(1, "STEINS;GATE").forum_tag_id == 202
+
+        assert [game.key for game in store.search_games(1, "gate")] == [
+            "steins;gate",
+            "steins;gate 0",
+        ]
+        assert store.remove_game(1, "steins;gate 0") is True
+        assert store.remove_game(1, "missing") is False
+        assert [game.key for game in store.list_games(1)] == ["steins;gate"]
+    finally:
+        store.close()
+
+
+def test_normalize_game_key_collapses_case_and_whitespace():
+    assert normalize_game_key("  Steins;Gate   Re:Boot  ") == "steins;gate re:boot"
+
+
+def test_play_store_migrates_games_from_default_forum(temp_db_path):
+    db = sqlite3.connect(temp_db_path)
+    try:
+        db.execute(
+            """
+            CREATE TABLE play_config (
+                guild_id              INTEGER PRIMARY KEY,
+                forum_channel_id      INTEGER,
+                auto_archive_duration INTEGER,
+                created_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE play_game (
+                guild_id     INTEGER NOT NULL,
+                key          TEXT    NOT NULL,
+                display_name TEXT    NOT NULL,
+                forum_tag_id INTEGER,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, key)
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO play_config (guild_id, forum_channel_id) VALUES (?, ?)",
+            (1, 100),
+        )
+        db.execute(
+            """
+            INSERT INTO play_game (guild_id, key, display_name, forum_tag_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (1, "steins;gate", "Steins;Gate", 200),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    store = PlayStore()
+    try:
+        assert store.get_game(1, "Steins;Gate").forum_channel_id == 100
     finally:
         store.close()

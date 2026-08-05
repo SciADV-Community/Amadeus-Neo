@@ -23,12 +23,15 @@ AUTO_ARCHIVE_CHOICES = [
     app_commands.Choice(name="7 days", value=10080),
 ]
 VALID_AUTO_ARCHIVE_DURATIONS = {choice.value for choice in AUTO_ARCHIVE_CHOICES}
+MAX_FORUM_TAG_NAME_LENGTH = 20
 
 
 def tag_name_error(name: str) -> str | None:
     name = name.strip()
     if not name:
         return "Forum tag name cannot be empty."
+    if len(name) > MAX_FORUM_TAG_NAME_LENGTH:
+        return f"Forum tag name must be {MAX_FORUM_TAG_NAME_LENGTH} characters or fewer."
     error = game_name_error(name)
     if error is None:
         return None

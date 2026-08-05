@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, tag_name_error
 from cogs.play import (
     SPOILER_CHANNEL_FLAG,
     calculate_spoiler_flags,
@@ -41,6 +42,15 @@ def test_game_name_validation_rejects_empty_long_control_and_mentions():
     assert game_name_error("x" * 81) == "Game name must be 80 characters or fewer."
     assert game_name_error("Steins\x00Gate") == "Game name cannot contain control or bidirectional formatting characters."
     assert game_name_error("@everyone") == "Game name cannot contain Discord mention syntax."
+
+
+def test_tag_name_validation_enforces_discord_forum_tag_limit():
+    assert tag_name_error("x" * MAX_FORUM_TAG_NAME_LENGTH) is None
+    assert tag_name_error("x" * (MAX_FORUM_TAG_NAME_LENGTH + 1)) == (
+        "Forum tag name must be 20 characters or fewer."
+    )
+    assert tag_name_error(" ") == "Forum tag name cannot be empty."
+    assert tag_name_error("@everyone") == "Forum tag name cannot contain Discord mention syntax."
 
 
 def test_format_play_thread_name_preserves_shape_and_length():

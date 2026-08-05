@@ -31,8 +31,7 @@ Example layout:
 The bot needs these permissions in every configured playthrough forum channel:
 
 - View Channels
-- Send Messages
-- Create Public Threads
+- Send Messages / Create Posts
 - Send Messages in Threads
 - Manage Threads
 - Manage Channels
@@ -60,7 +59,7 @@ The `game` option autocompletes from the server's configured games. After the co
 | `/amadeus play archive-duration <minutes>` | Set the auto-archive duration used for new playthrough posts |
 | `/amadeus play config` | Show current configuration and permission status |
 
-`/amadeus play` commands require Amadeus admin access. They can be used before the module is enabled so admins can configure the module first.
+`/amadeus play` commands require Amadeus admin access and the `play` module must be enabled on the server.
 
 ## How It Works
 

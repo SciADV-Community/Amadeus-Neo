@@ -5,6 +5,7 @@ from discord.ext import commands
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import escape_untrusted_text
 from amadeus.logging_utils import log
+from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
 from amadeus.play_store import PlayStore
 from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
@@ -65,6 +66,11 @@ class PlayAdmin(commands.Cog):
         self.bot = bot
         self.play_store = PlayStore()
         self.module_store = ConfigStore()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await require_module_enabled_for_interaction(
+            interaction, self.module_store, MODULE_NAME
+        )
 
     def cog_unload(self):
         detach_amadeus_subgroup(self.bot, self.play.name)

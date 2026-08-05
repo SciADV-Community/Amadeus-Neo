@@ -30,8 +30,7 @@ _MENTIONISH_RE = re.compile(
 
 _PLAY_FORUM_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
     ("view_channel", "View Channels"),
-    ("send_messages", "Send Messages"),
-    ("create_public_threads", "Create Public Threads"),
+    ("send_messages", "Send Messages / Create Posts"),
     ("send_messages_in_threads", "Send Messages in Threads"),
     ("manage_threads", "Manage Threads"),
     ("manage_channels", "Manage Channels"),

@@ -33,7 +33,7 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 Create the bot application in the Discord Developer Portal, then replace `YOUR_CLIENT_ID` in this URL:
 
 ```text
-https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1429418863638&scope=bot%20applications.commands
+https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1395059125270&scope=bot%20applications.commands
 ```
 
 This invite includes the baseline permissions needed for all current modules:
@@ -43,7 +43,6 @@ This invite includes the baseline permissions needed for all current modules:
 - Embed Links
 - Attach Files
 - Use Application Commands
-- Create Public Threads
 - Send Messages in Threads
 - Manage Threads
 - Manage Roles
@@ -77,7 +76,7 @@ See each module's documentation for its specific permission requirements.
 | [honeypot](docs/modules/honeypot.md) | Manage Channel, Manage Messages, plus permissions for the chosen action |
 | [boost](docs/modules/boost.md) | Manage Roles, Manage Emojis and Stickers |
 | [activity](docs/modules/activity.md) | Manage Roles |
-| [play](docs/modules/play.md) | Manage Channels, Create Public Threads, Send Messages in Threads, Manage Threads |
+| [play](docs/modules/play.md) | Manage Channels, Send Messages / Create Posts, Send Messages in Threads, Manage Threads |
 
 ### Privileged Gateway Intents
 

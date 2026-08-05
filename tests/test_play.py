@@ -1,10 +1,11 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
 
-from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, tag_name_error
+from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, PlayAdmin, tag_name_error
 from cogs.play import (
     MAX_FORUM_THREAD_TAGS,
     Play,
@@ -190,7 +191,6 @@ def test_missing_play_forum_permissions_lists_only_missing_permissions():
     forum = FakeForum([], permissions)
 
     assert missing_play_forum_permissions(forum, SimpleNamespace()) == [
-        "Create Public Threads",
         "Manage Threads",
     ]
 
@@ -209,6 +209,25 @@ def test_missing_member_play_forum_permissions_checks_member_access_only():
     assert missing_member_play_forum_permissions(forum, SimpleNamespace()) == [
         "View Channels",
     ]
+
+
+def test_play_admin_interaction_check_requires_enabled_module():
+    interaction = SimpleNamespace(
+        guild_id=1,
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+    cog = SimpleNamespace(
+        module_store=SimpleNamespace(
+            is_module_enabled=lambda guild_id, module_name: False
+        )
+    )
+
+    assert asyncio.run(PlayAdmin.interaction_check(cog, interaction)) is False
+    interaction.response.send_message.assert_awaited_once_with(
+        "The **play** module is not enabled on this server.\n"
+        "Enable it first with `/amadeus module enable play`.",
+        ephemeral=True,
+    )
 
 
 def test_active_thread_lookup_failure_edits_original_response(temp_db_path):

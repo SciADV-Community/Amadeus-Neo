@@ -1,9 +1,13 @@
 import asyncio
 from types import SimpleNamespace
 
+import discord
+import pytest
+
 from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, tag_name_error
 from cogs.play import (
     MAX_FORUM_THREAD_TAGS,
+    Play,
     SPOILER_CHANNEL_FLAG,
     additional_spoiler_tags,
     calculate_spoiler_flags,
@@ -11,8 +15,10 @@ from cogs.play import (
     format_play_thread_name,
     game_name_error,
     mark_thread_spoiler,
+    missing_member_play_forum_permissions,
     missing_play_forum_permissions,
     resolve_additional_spoiler_tags,
+    starter_message_matches_playthrough,
     thread_has_tag,
     thread_name_matches_player,
     thread_name_matches_playthrough,
@@ -40,11 +46,22 @@ class FakeHttp:
         self.calls.append((channel_id, kwargs))
 
 
+class FakeInteraction:
+    def __init__(self, guild):
+        self.guild = guild
+        self.edits = []
+
+    async def edit_original_response(self, **kwargs):
+        self.edits.append(kwargs)
+
+
 def test_game_name_validation_rejects_empty_long_control_and_mentions():
     assert game_name_error("Steins;Gate") is None
     assert game_name_error(" ") == "Game name cannot be empty."
     assert game_name_error("x" * 81) == "Game name must be 80 characters or fewer."
-    assert game_name_error("Steins\x00Gate") == "Game name cannot contain control or bidirectional formatting characters."
+    assert game_name_error("Steins\x00Gate") == (
+        "Game name cannot contain control or bidirectional formatting characters."
+    )
     assert game_name_error("@everyone") == "Game name cannot contain Discord mention syntax."
 
 
@@ -78,6 +95,10 @@ def test_forum_tag_helpers_match_by_id_or_case_insensitive_name():
     thread = SimpleNamespace(applied_tags=[gate])
     assert thread_has_tag(thread, 10) is True
     assert thread_has_tag(thread, 20) is False
+    assert (
+        thread_has_tag(SimpleNamespace(applied_tags=[], _applied_tags=[20]), 20)
+        is True
+    )
 
 
 def test_additional_spoiler_tags_excludes_required_game_tag():
@@ -134,6 +155,29 @@ def test_thread_name_playthrough_match_requires_the_selected_game():
     assert thread_name_matches_playthrough(thread, zero, member) is False
 
 
+@pytest.mark.filterwarnings("ignore:'count' is passed as positional argument:DeprecationWarning")
+def test_starter_message_match_survives_nickname_changes_without_prefix_false_positive():
+    member = SimpleNamespace(id=123, mention="<@123>", display_name="Renamed")
+    gate = SimpleNamespace(display_name="Steins;Gate")
+    zero = SimpleNamespace(display_name="Steins;Gate 0")
+
+    assert starter_message_matches_playthrough(
+        "<@123> | Spoilers for Steins;Gate",
+        gate,
+        member,
+    ) is True
+    assert starter_message_matches_playthrough(
+        "<@!123> | Spoilers for Steins;Gate 0, Chaos;Head (replay)",
+        zero,
+        member,
+    ) is True
+    assert starter_message_matches_playthrough(
+        "<@123> | Spoilers for Steins;Gate 0",
+        gate,
+        member,
+    ) is False
+
+
 def test_missing_play_forum_permissions_lists_only_missing_permissions():
     permissions = SimpleNamespace(
         view_channel=True,
@@ -148,6 +192,59 @@ def test_missing_play_forum_permissions_lists_only_missing_permissions():
     assert missing_play_forum_permissions(forum, SimpleNamespace()) == [
         "Create Public Threads",
         "Manage Threads",
+    ]
+
+
+def test_missing_member_play_forum_permissions_checks_member_access_only():
+    permissions = SimpleNamespace(
+        view_channel=False,
+        send_messages=False,
+        create_public_threads=False,
+        send_messages_in_threads=True,
+        manage_threads=False,
+        manage_channels=False,
+    )
+    forum = FakeForum([], permissions)
+
+    assert missing_member_play_forum_permissions(forum, SimpleNamespace()) == [
+        "View Channels",
+    ]
+
+
+def test_active_thread_lookup_failure_edits_original_response(temp_db_path):
+    class Guild:
+        id = 1
+
+        async def active_threads(self):
+            response = SimpleNamespace(status=500, reason="Internal Server Error")
+            raise discord.HTTPException(response, "boom")
+
+    interaction = FakeInteraction(Guild())
+    cog = Play(SimpleNamespace())
+
+    try:
+        thread, ok = asyncio.run(
+            cog._find_active_play_thread_or_respond(
+                interaction,
+                forum=SimpleNamespace(id=10),
+                play_game=SimpleNamespace(display_name="Steins;Gate", key="steins;gate"),
+                required_tag=SimpleNamespace(id=20),
+                member=SimpleNamespace(id=30),
+            )
+        )
+    finally:
+        cog.cog_unload()
+
+    assert thread is None
+    assert ok is False
+    assert interaction.edits == [
+        {
+            "content": (
+                "I couldn't check existing active playthrough posts right now. "
+                "Please try again in a moment."
+            ),
+            "view": None,
+        }
     ]
 
 

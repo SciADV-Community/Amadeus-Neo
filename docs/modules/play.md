@@ -39,6 +39,8 @@ The bot needs these permissions in every configured playthrough forum channel:
 
 `Manage Channels` is required because Spoiler Channel is currently exposed by Discord as a channel flag. discord.py does not expose that setting as a public `ForumChannel.create_thread` or `Thread.edit` parameter yet, so the module uses discord.py's HTTP client to patch the created thread's flags.
 
+Members must also have **View Channels** and **Send Messages in Threads** in the configured forum. `/play` will not create a post in a forum the member cannot access.
+
 ## Member Commands
 
 | Command | Description |
@@ -72,7 +74,7 @@ The `game` option autocompletes from the server's configured games. After the co
 8. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
 9. The bot posts the playthrough guidance message inside the thread.
 
-The module does not store player sessions in SQLite. Discord forum threads are the source of truth. Archived threads are not queried during normal `/play` usage.
+The duplicate check uses active threads only. It matches the selected game, forum, and player ID from the starter post, so nickname changes do not create duplicate active posts. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play` usage.
 
 ## Database
 

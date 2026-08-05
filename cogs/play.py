@@ -36,6 +36,10 @@ _PLAY_FORUM_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
     ("manage_threads", "Manage Threads"),
     ("manage_channels", "Manage Channels"),
 )
+_PLAY_MEMBER_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channels"),
+    ("send_messages_in_threads", "Send Messages in Threads"),
+)
 
 
 def game_name_error(name: str) -> str | None:
@@ -110,7 +114,13 @@ def find_forum_tag(
 
 
 def thread_has_tag(thread: discord.Thread, tag_id: int) -> bool:
-    return any(tag.id == tag_id for tag in thread.applied_tags)
+    if any(tag.id == tag_id for tag in getattr(thread, "applied_tags", ())):
+        return True
+
+    return any(
+        int(raw_tag_id) == tag_id
+        for raw_tag_id in getattr(thread, "_applied_tags", ())
+    )
 
 
 def additional_spoiler_tags(
@@ -139,12 +149,18 @@ def resolve_additional_spoiler_tags(
     for tag_id in selected_tag_ids:
         if tag_id in seen_ids:
             if tag_id == required_tag.id:
-                return [], "The selected game tag is applied automatically and cannot be selected again."
+                return (
+                    [],
+                    "The selected game tag is applied automatically and cannot be selected again.",
+                )
             continue
 
         tag = forum.get_tag(tag_id)
         if tag is None:
-            return [], "One of the selected spoiler tags is no longer available. Run `/play` again."
+            return (
+                [],
+                "One of the selected spoiler tags is no longer available. Run `/play` again.",
+            )
 
         resolved.append(tag)
         seen_ids.add(tag.id)
@@ -166,6 +182,31 @@ def thread_name_matches_playthrough(
     return thread.name.casefold() == expected_name
 
 
+def starter_message_matches_playthrough(
+    content: str,
+    game: PlayGame,
+    member: discord.Member,
+) -> bool:
+    safe_game_name = escape_untrusted_text(game.display_name)
+    mention_prefixes = (
+        f"{member.mention} | Spoilers for ",
+        f"<@!{member.id}> | Spoilers for ",
+    )
+
+    for prefix in mention_prefixes:
+        if not content.startswith(prefix):
+            continue
+
+        remainder = content[len(prefix):]
+        return (
+            remainder == safe_game_name
+            or remainder == f"{safe_game_name} (replay)"
+            or remainder.startswith(f"{safe_game_name}, ")
+        )
+
+    return False
+
+
 async def find_active_play_thread(
     guild: discord.Guild,
     forum: discord.ForumChannel,
@@ -183,6 +224,20 @@ async def find_active_play_thread(
         if thread_name_matches_playthrough(thread, game, member):
             return thread
 
+        starter_message = thread.starter_message
+        if starter_message is None:
+            try:
+                starter_message = await thread.fetch_message(thread.id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                starter_message = None
+
+        if starter_message is not None and starter_message_matches_playthrough(
+            starter_message.content,
+            game,
+            member,
+        ):
+            return thread
+
     return None
 
 
@@ -194,6 +249,18 @@ def missing_play_forum_permissions(
     return [
         label
         for attr, label in _PLAY_FORUM_REQUIRED_PERMS
+        if not getattr(permissions, attr)
+    ]
+
+
+def missing_member_play_forum_permissions(
+    forum: discord.ForumChannel,
+    member: discord.Member,
+) -> list[str]:
+    permissions = forum.permissions_for(member)
+    return [
+        label
+        for attr, label in _PLAY_MEMBER_REQUIRED_PERMS
         if not getattr(permissions, attr)
     ]
 
@@ -245,6 +312,7 @@ class _PlaySpoilerTagView(discord.ui.View):
         self.replay = replay
         self.auto_archive_duration = auto_archive_duration
         self.selected_tag_ids: list[int] = []
+        self.message: discord.InteractionMessage | None = None
 
         selectable_tags = additional_spoiler_tags(forum, required_tag)
         if selectable_tags:
@@ -264,6 +332,18 @@ class _PlaySpoilerTagView(discord.ui.View):
             )
             return False
         return True
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+
+        try:
+            await self.message.edit(
+                content="Playthrough setup timed out.",
+                view=None,
+            )
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(label="Create", style=discord.ButtonStyle.success, row=1)
     async def create(
@@ -310,6 +390,7 @@ class Play(commands.Cog):
         self.bot = bot
         self.play_store = PlayStore()
         self.module_store = ConfigStore()
+        self._inflight_creates: set[tuple[int, int, str]] = set()
 
     def cog_unload(self):
         self.play_store.close()
@@ -359,6 +440,42 @@ class Play(commands.Cog):
                 logger_name="play",
             )
 
+    async def _find_active_play_thread_or_respond(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        member: discord.Member,
+    ) -> tuple[discord.Thread | None, bool]:
+        try:
+            return (
+                await find_active_play_thread(
+                    interaction.guild,
+                    forum,
+                    play_game,
+                    required_tag,
+                    member,
+                ),
+                True,
+            )
+        except discord.HTTPException as e:
+            guild_id = interaction.guild.id if interaction.guild else "—"
+            log(
+                f"PLAY // ACTIVE THREAD LOOKUP FAILED 『 GUILD {guild_id} 』 // {e}",
+                level="debug",
+                logger_name="play",
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "I couldn't check existing active playthrough posts right now. "
+                    "Please try again in a moment."
+                ),
+                view=None,
+            )
+            return None, False
+
     async def create_playthrough_thread(
         self,
         interaction: discord.Interaction,
@@ -377,6 +494,34 @@ class Play(commands.Cog):
             )
             return
 
+        lock_key = (interaction.guild.id, interaction.user.id, play_game.key)
+        if lock_key in self._inflight_creates:
+            await interaction.edit_original_response(
+                content=(
+                    "A playthrough post for this game is already being created. "
+                    "Please wait a moment."
+                ),
+                view=None,
+            )
+            return
+
+        missing_member_permissions = missing_member_play_forum_permissions(
+            forum,
+            interaction.user,
+        )
+        if missing_member_permissions:
+            needed = ", ".join(
+                f"**{permission}**" for permission in missing_member_permissions
+            )
+            await interaction.edit_original_response(
+                content=(
+                    f"You do not have the required permissions in {forum.mention}.\n\n"
+                    f"Required: {needed}."
+                ),
+                view=None,
+            )
+            return
+
         extra_tags, error = resolve_additional_spoiler_tags(
             forum,
             required_tag,
@@ -386,23 +531,51 @@ class Play(commands.Cog):
             await interaction.edit_original_response(content=error, view=None)
             return
 
-        existing_thread = await find_active_play_thread(
-            interaction.guild,
-            forum,
-            play_game,
-            required_tag,
-            interaction.user,
-        )
-        if existing_thread is not None:
-            await interaction.edit_original_response(
-                content=(
-                    f"You already have an active **{escape_untrusted_text(play_game.display_name)}** "
-                    f"playthrough post: {existing_thread.mention}"
-                ),
-                view=None,
+        self._inflight_creates.add(lock_key)
+        try:
+            existing_thread, lookup_ok = await self._find_active_play_thread_or_respond(
+                interaction,
+                forum=forum,
+                play_game=play_game,
+                required_tag=required_tag,
+                member=interaction.user,
             )
-            return
+            if not lookup_ok:
+                return
+            if existing_thread is not None:
+                safe_game_name = escape_untrusted_text(play_game.display_name)
+                await interaction.edit_original_response(
+                    content=(
+                        f"You already have an active **{safe_game_name}** "
+                        f"playthrough post: {existing_thread.mention}"
+                    ),
+                    view=None,
+                )
+                return
 
+            await self._create_playthrough_thread_unlocked(
+                interaction,
+                forum=forum,
+                play_game=play_game,
+                required_tag=required_tag,
+                extra_tags=extra_tags,
+                replay=replay,
+                auto_archive_duration=auto_archive_duration,
+            )
+        finally:
+            self._inflight_creates.discard(lock_key)
+
+    async def _create_playthrough_thread_unlocked(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        extra_tags: list[discord.ForumTag],
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
         safe_game_name = escape_untrusted_text(play_game.display_name)
         replay_note = " (replay)" if replay else ""
         thread_name = format_play_thread_name(play_game.display_name, interaction.user)
@@ -410,7 +583,10 @@ class Play(commands.Cog):
             escape_untrusted_text(tag.name)
             for tag in extra_tags
         ]
-        starter_content = f"{interaction.user.mention} | Spoilers for {', '.join(spoiler_names)}{replay_note}"
+        starter_content = (
+            f"{interaction.user.mention} | Spoilers for "
+            f"{', '.join(spoiler_names)}{replay_note}"
+        )
 
         try:
             result = await forum.create_thread(
@@ -447,14 +623,18 @@ class Play(commands.Cog):
         try:
             await mark_thread_spoiler(
                 thread,
-                reason=f"Mark playthrough post as spoiler for {interaction.user} ({interaction.user.id})",
+                reason=(
+                    f"Mark playthrough post as spoiler for "
+                    f"{interaction.user} ({interaction.user.id})"
+                ),
             )
         except discord.Forbidden:
             await self._archive_failed_thread(thread)
             await interaction.edit_original_response(
                 content=(
-                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
-                    "so I archived it. Check my Manage Channels and Manage Threads permissions."
+                    "I created the playthrough post, but Discord rejected the "
+                    "Spoiler Channel update, so I archived it. Check my Manage "
+                    "Channels and Manage Threads permissions."
                 ),
                 view=None,
             )
@@ -463,7 +643,8 @@ class Play(commands.Cog):
             await self._archive_failed_thread(thread)
             await interaction.edit_original_response(
                 content=(
-                    "I created the playthrough post, but Discord rejected the Spoiler Channel update, "
+                    "I created the playthrough post, but Discord rejected the "
+                    "Spoiler Channel update, "
                     f"so I archived it.\n\nError: `{e}`"
                 ),
                 view=None,
@@ -478,7 +659,8 @@ class Play(commands.Cog):
             )
         except discord.HTTPException as e:
             log(
-                f"PLAY // INTRO MESSAGE FAILED 『 THREAD {thread.id} 』 GUILD 『 {interaction.guild.id} 』 // {e}",
+                f"PLAY // INTRO MESSAGE FAILED 『 THREAD {thread.id} 』 "
+                f"GUILD 『 {interaction.guild.id} 』 // {e}",
                 level="debug",
                 logger_name="play",
             )
@@ -533,12 +715,16 @@ class Play(commands.Cog):
             )
             return
 
-        forum_channel_id = play_game.forum_channel_id or (config.forum_channel_id if config else None)
+        forum_channel_id = (
+            play_game.forum_channel_id
+            or (config.forum_channel_id if config else None)
+        )
         forum = await self._get_forum_channel(interaction.guild, forum_channel_id)
 
         if forum is None:
+            safe_game_name = escape_untrusted_text(play_game.display_name)
             await interaction.response.send_message(
-                f"**{escape_untrusted_text(play_game.display_name)}** does not have a valid playthrough forum. "
+                f"**{safe_game_name}** does not have a valid playthrough forum. "
                 "Ask an admin to run `/amadeus play add-game` with a forum channel.",
                 ephemeral=True,
             )
@@ -575,19 +761,37 @@ class Play(commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        existing_thread = await find_active_play_thread(
-            interaction.guild,
+        missing_member_permissions = missing_member_play_forum_permissions(
             forum,
-            play_game,
-            tag,
             interaction.user,
         )
+        if missing_member_permissions:
+            needed = ", ".join(
+                f"**{permission}**" for permission in missing_member_permissions
+            )
+            await interaction.response.send_message(
+                f"You do not have the required permissions in {forum.mention}.\n\n"
+                f"Required: {needed}.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        existing_thread, lookup_ok = await self._find_active_play_thread_or_respond(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=tag,
+            member=interaction.user,
+        )
+        if not lookup_ok:
+            return
         if existing_thread is not None:
+            safe_game_name = escape_untrusted_text(play_game.display_name)
             await interaction.edit_original_response(
                 content=(
-                    f"You already have an active **{escape_untrusted_text(play_game.display_name)}** "
+                    f"You already have an active **{safe_game_name}** "
                     f"playthrough post: {existing_thread.mention}"
                 )
             )
@@ -613,7 +817,7 @@ class Play(commands.Cog):
             if tag.name
             else ""
         )
-        await interaction.edit_original_response(
+        view.message = await interaction.edit_original_response(
             content=(
                 f"Would you like to include any additional spoilers in this channel "
                 f"for **{safe_game_name}**?{tag_note}"

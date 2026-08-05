@@ -2,6 +2,16 @@
 
 ---
 
+### 1.7.3
+- Fixed `/play` creating duplicate playthroughs if a nickname changes
+  - Duplicate check also checks the player ID in the starting post
+- Fixed active thread lookup failures triggering "no existing post". It will now just fail, which is preferable
+- Fixed race condition for `/play` when concurrent instances run for the same game, bypassing duplicate check
+- Fixed missed spoiler tag matches when Discord returned applied tags as raw IDs
+- Fixed the additional spoiler tag picker leaving live buttons behind after it expired.
+  - The prompt now reports that setup timed out
+- Fixed an issue where people could use `/play` to make posts in forums they cannot see or post in
+
 ### 1.7.2
 - Added an ephemeral additional spoiler tag picker to `/play`.
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import discord
 import pytest
 
+import cogs.play as play_module
 from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, PlayAdmin, tag_name_error
 from cogs.play import (
     MAX_FORUM_THREAD_TAGS,
@@ -285,3 +286,248 @@ def test_mark_thread_spoiler_patches_channel_flags():
     assert http.calls == [
         (123, {"flags": 2 | SPOILER_CHANNEL_FLAG, "reason": "test"})
     ]
+
+
+class FakeMember:
+    def __init__(self, member_id=2, display_name="Zips"):
+        self.id = member_id
+        self.display_name = display_name
+        self.mention = f"<@{member_id}>"
+        self.roles = []
+
+    def __str__(self):
+        return self.display_name
+
+
+class FakeResponse:
+    def __init__(self):
+        self.send_message = AsyncMock()
+        self.defer = AsyncMock()
+
+
+class FakeCommandInteraction:
+    def __init__(self, *, guild, user):
+        self.guild = guild
+        self.guild_id = guild.id if guild else None
+        self.user = user
+        self.response = FakeResponse()
+        self.edits = []
+
+    async def edit_original_response(self, **kwargs):
+        self.edits.append(kwargs)
+        return SimpleNamespace(id=999)
+
+
+def all_play_permissions(**overrides):
+    values = {
+        "view_channel": True,
+        "send_messages": True,
+        "create_public_threads": True,
+        "send_messages_in_threads": True,
+        "manage_threads": True,
+        "manage_channels": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_play_cog():
+    cog = Play.__new__(Play)
+    cog._inflight_creates = set()
+    cog.module_store = SimpleNamespace()
+    cog.play_store = SimpleNamespace()
+    return cog
+
+
+def test_create_playthrough_thread_handles_guard_paths(monkeypatch):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+    member = FakeMember()
+    guild = SimpleNamespace(id=1)
+    gate = SimpleNamespace(id=10, name="Steins;Gate")
+    forum = FakeForum([gate], all_play_permissions(view_channel=False))
+    forum.mention = "#play"
+    play_game = SimpleNamespace(display_name="Steins;Gate", key="steins-gate")
+    cog = make_play_cog()
+
+    interaction = FakeCommandInteraction(guild=None, user=member)
+    asyncio.run(
+        cog.create_playthrough_thread(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=gate,
+            selected_tag_ids=[],
+            replay=False,
+            auto_archive_duration=None,
+        )
+    )
+    assert interaction.edits[-1] == {
+        "content": "This can only be used inside a server.",
+        "view": None,
+    }
+
+    interaction = FakeCommandInteraction(guild=guild, user=member)
+    asyncio.run(
+        cog.create_playthrough_thread(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=gate,
+            selected_tag_ids=[],
+            replay=False,
+            auto_archive_duration=None,
+        )
+    )
+    assert "required permissions" in interaction.edits[-1]["content"]
+
+    forum = FakeForum([gate], all_play_permissions())
+    forum.mention = "#play"
+    interaction = FakeCommandInteraction(guild=guild, user=member)
+    asyncio.run(
+        cog.create_playthrough_thread(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=gate,
+            selected_tag_ids=[gate.id],
+            replay=False,
+            auto_archive_duration=None,
+        )
+    )
+    assert "applied automatically" in interaction.edits[-1]["content"]
+
+
+def test_create_playthrough_thread_serializes_duplicate_and_existing_thread(monkeypatch):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+    member = FakeMember()
+    guild = SimpleNamespace(id=1)
+    gate = SimpleNamespace(id=10, name="Steins;Gate")
+    forum = FakeForum([gate], all_play_permissions())
+    forum.mention = "#play"
+    play_game = SimpleNamespace(display_name="Steins;Gate", key="steins-gate")
+    cog = make_play_cog()
+    cog._find_active_play_thread_or_respond = AsyncMock(
+        return_value=(SimpleNamespace(mention="#existing"), True)
+    )
+    cog._create_playthrough_thread_unlocked = AsyncMock()
+
+    cog._inflight_creates.add((1, 2, "steins-gate"))
+    interaction = FakeCommandInteraction(guild=guild, user=member)
+    asyncio.run(
+        cog.create_playthrough_thread(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=gate,
+            selected_tag_ids=[],
+            replay=False,
+            auto_archive_duration=None,
+        )
+    )
+    assert "already being created" in interaction.edits[-1]["content"]
+
+    cog._inflight_creates.clear()
+    interaction = FakeCommandInteraction(guild=guild, user=member)
+    asyncio.run(
+        cog.create_playthrough_thread(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=gate,
+            selected_tag_ids=[],
+            replay=False,
+            auto_archive_duration=None,
+        )
+    )
+    assert "#existing" in interaction.edits[-1]["content"]
+    assert cog._inflight_creates == set()
+    cog._create_playthrough_thread_unlocked.assert_not_awaited()
+
+
+def test_create_playthrough_thread_unlocked_creates_spoiler_thread(monkeypatch):
+    monkeypatch.setattr(play_module, "mark_thread_spoiler", AsyncMock())
+    member = FakeMember()
+    guild = SimpleNamespace(id=1)
+    interaction = FakeCommandInteraction(guild=guild, user=member)
+    thread = SimpleNamespace(id=123, mention="#thread", send=AsyncMock())
+    forum = SimpleNamespace(
+        mention="#play",
+        create_thread=AsyncMock(return_value=SimpleNamespace(thread=thread)),
+    )
+    required_tag = SimpleNamespace(id=10, name="Steins;Gate")
+    extra_tag = SimpleNamespace(id=20, name="Chaos;Head")
+    play_game = SimpleNamespace(display_name="Steins;Gate", key="steins-gate")
+    cog = make_play_cog()
+
+    asyncio.run(
+        cog._create_playthrough_thread_unlocked(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=required_tag,
+            extra_tags=[extra_tag],
+            replay=True,
+            auto_archive_duration=1440,
+        )
+    )
+
+    kwargs = forum.create_thread.await_args.kwargs
+    assert kwargs["name"] == "Steins;Gate | @Zips"
+    assert "Spoilers for Steins;Gate, Chaos;Head (replay)" in kwargs["content"]
+    assert kwargs["applied_tags"] == [required_tag, extra_tag]
+    play_module.mark_thread_spoiler.assert_awaited_once()
+    thread.send.assert_awaited_once()
+    assert interaction.edits[-1]["content"] == "Created your **Steins;Gate** playthrough post: #thread"
+
+
+def test_play_command_validates_config_and_reaches_tag_picker(monkeypatch):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+    module_enabled = AsyncMock(return_value=True)
+    monkeypatch.setattr(play_module, "require_module_enabled_for_interaction", module_enabled)
+
+    member = FakeMember()
+    bot_member = SimpleNamespace(id=99)
+    guild = SimpleNamespace(id=1, me=bot_member)
+    play_game = SimpleNamespace(
+        display_name="Steins;Gate",
+        key="steins-gate",
+        forum_channel_id=None,
+        forum_tag_id=10,
+    )
+    config = SimpleNamespace(forum_channel_id=50, auto_archive_duration=1440)
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    forum = FakeForum([tag], all_play_permissions())
+    forum.mention = "#play"
+    cog = make_play_cog()
+    cog.play_store = SimpleNamespace(
+        get_config=lambda guild_id: config,
+        get_game=lambda guild_id, game: play_game if game == "steins-gate" else None,
+    )
+    cog._get_forum_channel = AsyncMock(return_value=forum)
+    cog._find_active_play_thread_or_respond = AsyncMock(return_value=(None, True))
+
+    missing_game = FakeCommandInteraction(guild=guild, user=member)
+    asyncio.run(Play.play.callback(cog, missing_game, "missing", False))
+    missing_game.response.send_message.assert_awaited_once_with(
+        "That game is not configured for playthroughs on this server.",
+        ephemeral=True,
+    )
+
+    forum_missing = FakeCommandInteraction(guild=guild, user=member)
+    cog._get_forum_channel = AsyncMock(return_value=None)
+    asyncio.run(Play.play.callback(cog, forum_missing, "steins-gate", False))
+    assert "valid playthrough forum" in forum_missing.response.send_message.await_args.args[0]
+
+    tag_missing = FakeCommandInteraction(guild=guild, user=member)
+    empty_forum = FakeForum([], all_play_permissions())
+    empty_forum.mention = "#play"
+    cog._get_forum_channel = AsyncMock(return_value=empty_forum)
+    asyncio.run(Play.play.callback(cog, tag_missing, "steins-gate", False))
+    assert "missing its forum tag" in tag_missing.response.send_message.await_args.args[0]
+
+    success = FakeCommandInteraction(guild=guild, user=member)
+    cog._get_forum_channel = AsyncMock(return_value=forum)
+    asyncio.run(Play.play.callback(cog, success, "steins-gate", True))
+    success.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    assert "additional spoilers" in success.edits[-1]["content"]
+    assert success.edits[-1]["view"] is not None

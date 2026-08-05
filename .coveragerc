@@ -1,0 +1,10 @@
+[run]
+source =
+    amadeus
+    cogs
+
+[report]
+show_missing = True
+skip_covered = True
+omit =
+    amadeus/ascii.py

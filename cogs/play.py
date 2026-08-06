@@ -59,9 +59,13 @@ def _clean_thread_name_part(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip() or "unknown"
 
 
+def _member_username(member: discord.Member) -> str:
+    return getattr(member, "name", None) or member.display_name
+
+
 def format_play_thread_name(game_name: str, member: discord.Member) -> str:
     game_part = _clean_thread_name_part(game_name)
-    user_part = f"@{_clean_thread_name_part(member.display_name)}"
+    user_part = f"@{_clean_thread_name_part(_member_username(member))}"
     separator = " | "
 
     max_game_length = MAX_PLAY_THREAD_NAME_LENGTH - len(separator) - len(user_part)
@@ -168,8 +172,8 @@ def resolve_additional_spoiler_tags(
 
 
 def thread_name_matches_player(thread: discord.Thread, member: discord.Member) -> bool:
-    suffix = f" | @{_clean_thread_name_part(member.display_name)}".casefold()
-    return thread.name.casefold().endswith(suffix)
+    username = _clean_thread_name_part(_member_username(member)).casefold()
+    return f"@{username}" in thread.name.casefold()
 
 
 def thread_name_matches_playthrough(
@@ -179,31 +183,6 @@ def thread_name_matches_playthrough(
 ) -> bool:
     expected_name = format_play_thread_name(game.display_name, member).casefold()
     return thread.name.casefold() == expected_name
-
-
-def starter_message_matches_playthrough(
-    content: str,
-    game: PlayGame,
-    member: discord.Member,
-) -> bool:
-    safe_game_name = escape_untrusted_text(game.display_name)
-    mention_prefixes = (
-        f"{member.mention} | Spoilers for ",
-        f"<@!{member.id}> | Spoilers for ",
-    )
-
-    for prefix in mention_prefixes:
-        if not content.startswith(prefix):
-            continue
-
-        remainder = content[len(prefix):]
-        return (
-            remainder == safe_game_name
-            or remainder == f"{safe_game_name} (replay)"
-            or remainder.startswith(f"{safe_game_name}, ")
-        )
-
-    return False
 
 
 async def find_active_play_thread(
@@ -222,19 +201,7 @@ async def find_active_play_thread(
             continue
         if thread_name_matches_playthrough(thread, game, member):
             return thread
-
-        starter_message = thread.starter_message
-        if starter_message is None:
-            try:
-                starter_message = await thread.fetch_message(thread.id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                starter_message = None
-
-        if starter_message is not None and starter_message_matches_playthrough(
-            starter_message.content,
-            game,
-            member,
-        ):
+        if thread_name_matches_player(thread, member):
             return thread
 
     return None
@@ -378,6 +345,96 @@ class _PlaySpoilerTagView(discord.ui.View):
         self.stop()
 
 
+class _DuplicatePlayThreadView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "Play",
+        requester_id: int,
+        guild_id: int,
+        existing_thread: discord.Thread,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        selected_tag_ids: list[int] | None,
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.existing_thread = existing_thread
+        self.forum = forum
+        self.play_game = play_game
+        self.required_tag = required_tag
+        self.selected_tag_ids = selected_tag_ids
+        self.replay = replay
+        self.auto_archive_duration = auto_archive_duration
+        self.message: discord.InteractionMessage | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this playthrough can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This playthrough setup is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+
+        try:
+            await self.message.edit(
+                content="Playthrough setup timed out.",
+                view=None,
+            )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary, row=0)
+    async def no(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Playthrough creation cancelled.",
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger, row=0)
+    async def yes(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Archiving existing playthrough post...",
+            view=None,
+        )
+        self.stop()
+        await self.cog.archive_duplicate_and_continue(
+            interaction,
+            existing_thread=self.existing_thread,
+            forum=self.forum,
+            play_game=self.play_game,
+            required_tag=self.required_tag,
+            selected_tag_ids=self.selected_tag_ids,
+            replay=self.replay,
+            auto_archive_duration=self.auto_archive_duration,
+        )
+
+
 class Play(commands.Cog):
     """
     Visual Novel playthrough forum posts.
@@ -475,6 +532,156 @@ class Play(commands.Cog):
             )
             return None, False
 
+    async def _send_spoiler_tag_prompt(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        safe_game_name = escape_untrusted_text(play_game.display_name)
+        view = _PlaySpoilerTagView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            forum=forum,
+            play_game=play_game,
+            required_tag=required_tag,
+            replay=replay,
+            auto_archive_duration=auto_archive_duration,
+        )
+        tag_note = (
+            f"\n\nThe **{escape_untrusted_text(required_tag.name)}** tag will be "
+            "applied automatically."
+            if required_tag.name
+            else ""
+        )
+        view.message = await interaction.edit_original_response(
+            content=(
+                f"Would you like to include any additional spoilers in this channel "
+                f"for **{safe_game_name}**?{tag_note}"
+            ),
+            view=view,
+        )
+
+    async def _send_duplicate_confirmation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        existing_thread: discord.Thread,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        selected_tag_ids: list[int] | None,
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        safe_game_name = escape_untrusted_text(play_game.display_name)
+        view = _DuplicatePlayThreadView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            existing_thread=existing_thread,
+            forum=forum,
+            play_game=play_game,
+            required_tag=required_tag,
+            selected_tag_ids=selected_tag_ids,
+            replay=replay,
+            auto_archive_duration=auto_archive_duration,
+        )
+        view.message = await interaction.edit_original_response(
+            content=(
+                f"An active {safe_game_name} playthrough by you was found: "
+                f"{existing_thread.mention}.\n"
+                "Would you like to archive it and create a new channel?"
+            ),
+            view=view,
+        )
+
+    async def archive_duplicate_and_continue(
+        self,
+        interaction: discord.Interaction,
+        *,
+        existing_thread: discord.Thread,
+        forum: discord.ForumChannel,
+        play_game: PlayGame,
+        required_tag: discord.ForumTag,
+        selected_tag_ids: list[int] | None,
+        replay: bool,
+        auto_archive_duration: int | None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.edit_original_response(
+                content="This can only be used inside a server.",
+                view=None,
+            )
+            return
+
+        try:
+            await existing_thread.edit(
+                archived=True,
+                reason=(
+                    f"Replace active playthrough post for "
+                    f"{interaction.user} ({interaction.user.id})"
+                ),
+            )
+        except discord.Forbidden:
+            await interaction.edit_original_response(
+                content=(
+                    f"I could not archive {existing_thread.mention}. "
+                    "Check my Manage Threads permission."
+                ),
+                view=None,
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.edit_original_response(
+                content=f"Discord rejected the archive request: `{e}`",
+                view=None,
+            )
+            return
+
+        log(
+            f"PLAY // DUPLICATE ARCHIVED 『 THREAD {existing_thread.id} 』 "
+            f"GAME 『 {play_game.key} 』 USER 『 {interaction.user.id} 』 "
+            f"GUILD 『 {interaction.guild.id} 』",
+            level="debug",
+            logger_name="play",
+        )
+
+        if selected_tag_ids is None:
+            await self._send_spoiler_tag_prompt(
+                interaction,
+                forum=forum,
+                play_game=play_game,
+                required_tag=required_tag,
+                replay=replay,
+                auto_archive_duration=auto_archive_duration,
+            )
+            return
+
+        extra_tags, error = resolve_additional_spoiler_tags(
+            forum,
+            required_tag,
+            selected_tag_ids,
+        )
+        if error is not None:
+            await interaction.edit_original_response(content=error, view=None)
+            return
+
+        await self._create_playthrough_thread_unlocked(
+            interaction,
+            forum=forum,
+            play_game=play_game,
+            required_tag=required_tag,
+            extra_tags=extra_tags,
+            replay=replay,
+            auto_archive_duration=auto_archive_duration,
+        )
+
     async def create_playthrough_thread(
         self,
         interaction: discord.Interaction,
@@ -542,13 +749,15 @@ class Play(commands.Cog):
             if not lookup_ok:
                 return
             if existing_thread is not None:
-                safe_game_name = escape_untrusted_text(play_game.display_name)
-                await interaction.edit_original_response(
-                    content=(
-                        f"You already have an active **{safe_game_name}** "
-                        f"playthrough post: {existing_thread.mention}"
-                    ),
-                    view=None,
+                await self._send_duplicate_confirmation(
+                    interaction,
+                    existing_thread=existing_thread,
+                    forum=forum,
+                    play_game=play_game,
+                    required_tag=required_tag,
+                    selected_tag_ids=selected_tag_ids,
+                    replay=replay,
+                    auto_archive_duration=auto_archive_duration,
                 )
                 return
 
@@ -787,20 +996,24 @@ class Play(commands.Cog):
         if not lookup_ok:
             return
         if existing_thread is not None:
-            safe_game_name = escape_untrusted_text(play_game.display_name)
-            await interaction.edit_original_response(
-                content=(
-                    f"You already have an active **{safe_game_name}** "
-                    f"playthrough post: {existing_thread.mention}"
-                )
+            await self._send_duplicate_confirmation(
+                interaction,
+                existing_thread=existing_thread,
+                forum=forum,
+                play_game=play_game,
+                required_tag=tag,
+                selected_tag_ids=None,
+                replay=replay,
+                auto_archive_duration=(
+                    config.auto_archive_duration
+                    if config and config.auto_archive_duration
+                    else None
+                ),
             )
             return
 
-        safe_game_name = escape_untrusted_text(play_game.display_name)
-        view = _PlaySpoilerTagView(
-            cog=self,
-            requester_id=interaction.user.id,
-            guild_id=interaction.guild.id,
+        await self._send_spoiler_tag_prompt(
+            interaction,
             forum=forum,
             play_game=play_game,
             required_tag=tag,
@@ -810,18 +1023,6 @@ class Play(commands.Cog):
                 if config and config.auto_archive_duration
                 else None
             ),
-        )
-        tag_note = (
-            f"\n\nThe **{escape_untrusted_text(tag.name)}** tag will be applied automatically."
-            if tag.name
-            else ""
-        )
-        view.message = await interaction.edit_original_response(
-            content=(
-                f"Would you like to include any additional spoilers in this channel "
-                f"for **{safe_game_name}**?{tag_note}"
-            ),
-            view=view,
         )
 
 

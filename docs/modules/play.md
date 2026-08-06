@@ -65,15 +65,15 @@ The `game` option autocompletes from the server's configured games. After the co
 
 1. Member runs `/play` and picks a configured game.
 2. The bot resolves the game's configured forum and tag.
-3. The bot checks only active guild threads and filters them to that forum and selected game tag. If the member already has an active matching post, the bot returns that thread link instead of creating another.
-4. The bot asks, "Would you like to include any additional spoilers in this channel?" and shows a multi-select of the forum's other tags.
+3. The bot checks only active guild threads and filters them to that forum and selected game tag. If an active post name contains the member's Discord username, the bot asks whether to archive it and create a new post.
+4. If no duplicate exists, or the member confirms replacement, the bot asks, "Would you like to include any additional spoilers in this channel?" and shows a multi-select of the forum's other tags.
 5. The member picks up to four additional tags, or skips the select and clicks **Create**.
-6. The bot creates a forum post named `<game> | @username`.
+6. The bot creates a forum post named `<game> | @username`, using the member's Discord username rather than their server nickname.
 7. The starter post says `<@user> | Spoilers for <game>` plus any selected spoiler tags, which pings the member before spoiler gating is applied.
 8. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
 9. The bot posts the playthrough guidance message inside the thread.
 
-The duplicate check uses active threads only. It matches the selected game, forum, and player ID from the starter post, so nickname changes do not create duplicate active posts. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play` usage.
+The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username in the post name. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play` usage.
 
 ## Database
 

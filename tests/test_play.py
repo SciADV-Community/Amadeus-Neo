@@ -12,6 +12,7 @@ from cogs.play import (
     SPOILER_CHANNEL_FLAG,
     additional_spoiler_tags,
     calculate_spoiler_flags,
+    find_active_play_thread,
     find_forum_tag,
     format_play_thread_name,
     game_name_error,
@@ -19,7 +20,6 @@ from cogs.play import (
     missing_member_play_forum_permissions,
     missing_play_forum_permissions,
     resolve_additional_spoiler_tags,
-    starter_message_matches_playthrough,
     thread_has_tag,
     thread_name_matches_player,
     thread_name_matches_playthrough,
@@ -48,12 +48,23 @@ class FakeHttp:
 
 
 class FakeInteraction:
-    def __init__(self, guild):
+    def __init__(self, guild, *, user=None):
         self.guild = guild
+        self.guild_id = getattr(guild, "id", None)
+        self.user = user or SimpleNamespace(id=1)
         self.edits = []
 
     async def edit_original_response(self, **kwargs):
         self.edits.append(kwargs)
+
+
+class FakeThread:
+    def __init__(self, *, name, parent_id, tags, mention="#thread"):
+        self.name = name
+        self.parent_id = parent_id
+        self.applied_tags = tags
+        self._applied_tags = []
+        self.mention = mention
 
 
 def test_game_name_validation_rejects_empty_long_control_and_mentions():
@@ -75,13 +86,16 @@ def test_tag_name_validation_enforces_discord_forum_tag_limit():
     assert tag_name_error("@everyone") == "Forum tag name cannot contain Discord mention syntax."
 
 
-def test_format_play_thread_name_preserves_shape_and_length():
-    member = SimpleNamespace(display_name="Zips")
-    assert format_play_thread_name("Steins;Gate Re:Boot", member) == "Steins;Gate Re:Boot | @Zips"
+def test_format_play_thread_name_uses_username_not_nickname():
+    member = SimpleNamespace(name="zips", display_name="Server Nickname")
+    assert (
+        format_play_thread_name("Steins;Gate Re:Boot", member)
+        == "Steins;Gate Re:Boot | @zips"
+    )
 
     long_name = "A" * 140
     assert len(format_play_thread_name(long_name, member)) == 100
-    assert format_play_thread_name(long_name, member).endswith(" | @Zips")
+    assert format_play_thread_name(long_name, member).endswith(" | @zips")
 
 
 def test_forum_tag_helpers_match_by_id_or_case_insensitive_name():
@@ -141,42 +155,52 @@ def test_resolve_additional_spoiler_tags_validates_ids_and_limit():
 
 
 def test_thread_name_player_match_is_case_insensitive():
-    member = SimpleNamespace(display_name="Zips")
+    member = SimpleNamespace(name="zips", display_name="Server Nickname")
     thread = SimpleNamespace(name="Steins;Gate | @zips")
     assert thread_name_matches_player(thread, member) is True
+    assert (
+        thread_name_matches_player(
+            SimpleNamespace(name="Steins;Gate | @Server Nickname"),
+            member,
+        )
+        is False
+    )
 
 
 def test_thread_name_playthrough_match_requires_the_selected_game():
-    member = SimpleNamespace(display_name="Zips")
+    member = SimpleNamespace(name="zips", display_name="Server Nickname")
     gate = SimpleNamespace(display_name="Steins;Gate")
     zero = SimpleNamespace(display_name="Steins;Gate 0")
-    thread = SimpleNamespace(name="Steins;Gate | @Zips")
+    thread = SimpleNamespace(name="Steins;Gate | @zips")
 
     assert thread_name_matches_playthrough(thread, gate, member) is True
     assert thread_name_matches_playthrough(thread, zero, member) is False
 
 
-@pytest.mark.filterwarnings("ignore:'count' is passed as positional argument:DeprecationWarning")
-def test_starter_message_match_survives_nickname_changes_without_prefix_false_positive():
-    member = SimpleNamespace(id=123, mention="<@123>", display_name="Renamed")
-    gate = SimpleNamespace(display_name="Steins;Gate")
-    zero = SimpleNamespace(display_name="Steins;Gate 0")
+def test_find_active_play_thread_matches_username_in_active_post_name():
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    forum = SimpleNamespace(id=20)
+    member = SimpleNamespace(name="zips", display_name="Server Nickname")
+    game = SimpleNamespace(display_name="Steins;Gate")
+    nickname_thread = FakeThread(
+        name="Steins;Gate | @Server Nickname",
+        parent_id=20,
+        tags=[tag],
+    )
+    username_thread = FakeThread(
+        name="Steins;Gate replay | @zips",
+        parent_id=20,
+        tags=[tag],
+    )
 
-    assert starter_message_matches_playthrough(
-        "<@123> | Spoilers for Steins;Gate",
-        gate,
-        member,
-    ) is True
-    assert starter_message_matches_playthrough(
-        "<@!123> | Spoilers for Steins;Gate 0, Chaos;Head (replay)",
-        zero,
-        member,
-    ) is True
-    assert starter_message_matches_playthrough(
-        "<@123> | Spoilers for Steins;Gate 0",
-        gate,
-        member,
-    ) is False
+    class Guild:
+        async def active_threads(self):
+            return [nickname_thread, username_thread]
+
+    assert (
+        asyncio.run(find_active_play_thread(Guild(), forum, game, tag, member))
+        is username_thread
+    )
 
 
 def test_missing_play_forum_permissions_lists_only_missing_permissions():
@@ -228,6 +252,40 @@ def test_play_admin_interaction_check_requires_enabled_module():
         "Enable it first with `/amadeus module enable play`.",
         ephemeral=True,
     )
+
+
+@pytest.mark.filterwarnings("ignore:'count' is passed as positional argument:DeprecationWarning")
+def test_duplicate_confirmation_prompt_offers_no_then_yes(temp_db_path):
+    interaction = FakeInteraction(
+        SimpleNamespace(id=1),
+        user=SimpleNamespace(id=123),
+    )
+    cog = Play(SimpleNamespace())
+
+    try:
+        asyncio.run(
+            cog._send_duplicate_confirmation(
+                interaction,
+                existing_thread=SimpleNamespace(mention="#steins-gate"),
+                forum=SimpleNamespace(id=10),
+                play_game=SimpleNamespace(display_name="Steins;Gate", key="steins;gate"),
+                required_tag=SimpleNamespace(id=20),
+                selected_tag_ids=None,
+                replay=False,
+                auto_archive_duration=None,
+            )
+        )
+    finally:
+        cog.cog_unload()
+
+    assert interaction.edits[0]["content"] == (
+        "An active Steins;Gate playthrough by you was found: #steins-gate.\n"
+        "Would you like to archive it and create a new channel?"
+    )
+    assert [item.label for item in interaction.edits[0]["view"].children] == [
+        "No",
+        "Yes",
+    ]
 
 
 def test_active_thread_lookup_failure_edits_original_response(temp_db_path):

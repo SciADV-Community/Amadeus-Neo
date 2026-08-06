@@ -1,9 +1,13 @@
+import json
 import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
+from amadeus.constants import CACHE_DIR, PLAY_ARCHIVED_LOCK_GRACE_DAYS
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import NO_MENTIONS, escape_untrusted_text
 from amadeus.logging_utils import log
@@ -16,6 +20,11 @@ SPOILER_CHANNEL_FLAG = 1 << 21
 MAX_PLAY_THREAD_NAME_LENGTH = 100
 MAX_GAME_NAME_LENGTH = 80
 MAX_FORUM_THREAD_TAGS = 5
+PLAY_LOCK_SWEEP_INTERVAL_DAYS = 30
+PLAY_LOCK_SWEEP_INITIAL_LOOKBACK_DAYS = (
+    PLAY_LOCK_SWEEP_INTERVAL_DAYS + PLAY_ARCHIVED_LOCK_GRACE_DAYS
+)
+PLAY_LOCK_SWEEP_CHECKPOINT_VERSION = 1
 INTRO_MESSAGE_TEMPLATE = (
     "This channel is your personal {kind} channel for {game}. "
     "Upon completion the channel will automatically archive itself.\n"
@@ -39,6 +48,176 @@ _PLAY_MEMBER_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
     ("view_channel", "View Channels"),
     ("send_messages_in_threads", "Send Messages in Threads"),
 )
+_PLAY_LOCK_SWEEP_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channels"),
+    ("read_message_history", "Read Message History"),
+    ("manage_threads", "Manage Threads"),
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_utc_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return _coerce_utc(datetime.fromisoformat(normalized))
+    except ValueError:
+        return None
+
+
+def _format_utc_datetime(value: datetime) -> str:
+    return _coerce_utc(value).isoformat()
+
+
+def play_lock_sweep_checkpoint_path(
+    cache_dir: Path,
+    guild_id: int,
+    forum_channel_id: int,
+) -> Path:
+    return (
+        cache_dir
+        / str(guild_id)
+        / "play_lock_sweeps"
+        / f"{forum_channel_id}.json"
+    )
+
+
+def load_play_lock_sweep_checkpoint(
+    cache_dir: Path,
+    guild_id: int,
+    forum_channel_id: int,
+) -> dict[str, object] | None:
+    path = play_lock_sweep_checkpoint_path(cache_dir, guild_id, forum_channel_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def save_play_lock_sweep_checkpoint(
+    cache_dir: Path,
+    *,
+    guild_id: int,
+    forum_channel_id: int,
+    started_at: datetime,
+    completed_at: datetime,
+    archive_stop_at: datetime,
+    scanned_count: int,
+    locked_count: int,
+) -> None:
+    path = play_lock_sweep_checkpoint_path(cache_dir, guild_id, forum_channel_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": PLAY_LOCK_SWEEP_CHECKPOINT_VERSION,
+        "guild_id": str(guild_id),
+        "forum_channel_id": str(forum_channel_id),
+        "last_sweep_started_at": _format_utc_datetime(started_at),
+        "last_sweep_completed_at": _format_utc_datetime(completed_at),
+        "last_archive_stop_at": _format_utc_datetime(archive_stop_at),
+        "last_scanned_count": scanned_count,
+        "last_locked_count": locked_count,
+    }
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def play_lock_sweep_due(
+    checkpoint: dict[str, object] | None,
+    now: datetime,
+) -> bool:
+    if checkpoint is None:
+        return True
+
+    last_completed_at = _parse_utc_datetime(checkpoint.get("last_sweep_completed_at"))
+    if last_completed_at is None:
+        return True
+
+    return _coerce_utc(now) - last_completed_at >= timedelta(
+        days=PLAY_LOCK_SWEEP_INTERVAL_DAYS
+    )
+
+
+def play_lock_sweep_archive_stop_at(
+    checkpoint: dict[str, object] | None,
+    now: datetime,
+    grace_days: int,
+) -> datetime:
+    safe_grace_days = max(0, grace_days)
+    grace_delta = timedelta(days=safe_grace_days)
+    initial_lookback = timedelta(days=PLAY_LOCK_SWEEP_INTERVAL_DAYS + safe_grace_days)
+
+    if checkpoint is None:
+        return _coerce_utc(now) - initial_lookback
+
+    last_started_at = _parse_utc_datetime(checkpoint.get("last_sweep_started_at"))
+    if last_started_at is None:
+        return _coerce_utc(now) - initial_lookback
+
+    return last_started_at - grace_delta
+
+
+def thread_archive_timestamp(thread: discord.Thread) -> datetime:
+    archive_timestamp = getattr(thread, "archive_timestamp", None)
+    if isinstance(archive_timestamp, datetime):
+        return _coerce_utc(archive_timestamp)
+    return _coerce_utc(thread.created_at)
+
+
+def thread_last_activity_at(thread: discord.Thread) -> datetime:
+    last_message_id = getattr(thread, "last_message_id", None)
+    if last_message_id is not None:
+        try:
+            return _coerce_utc(discord.utils.snowflake_time(int(last_message_id)))
+        except (TypeError, ValueError):
+            pass
+
+    archive_timestamp = getattr(thread, "archive_timestamp", None)
+    if isinstance(archive_timestamp, datetime):
+        return _coerce_utc(archive_timestamp)
+    return _coerce_utc(thread.created_at)
+
+
+def is_playthrough_thread_name(name: str) -> bool:
+    return " | @" in name
+
+
+def should_lock_archived_play_thread(
+    thread: discord.Thread,
+    *,
+    configured_tag_ids: set[int],
+    now: datetime,
+    grace_days: int,
+) -> bool:
+    if getattr(thread, "locked", False):
+        return False
+    if getattr(thread, "archived", True) is False:
+        return False
+    if not is_playthrough_thread_name(thread.name):
+        return False
+    if not any(thread_has_tag(thread, tag_id) for tag_id in configured_tag_ids):
+        return False
+
+    lock_before = _coerce_utc(now) - timedelta(days=max(0, grace_days))
+    return thread_last_activity_at(thread) <= lock_before
 
 
 def game_name_error(name: str) -> str | None:
@@ -227,6 +406,18 @@ def missing_member_play_forum_permissions(
     return [
         label
         for attr, label in _PLAY_MEMBER_REQUIRED_PERMS
+        if not getattr(permissions, attr)
+    ]
+
+
+def missing_play_lock_sweep_permissions(
+    forum: discord.ForumChannel,
+    member: discord.Member,
+) -> list[str]:
+    permissions = forum.permissions_for(member)
+    return [
+        label
+        for attr, label in _PLAY_LOCK_SWEEP_REQUIRED_PERMS
         if not getattr(permissions, attr)
     ]
 
@@ -447,10 +638,18 @@ class Play(commands.Cog):
         self.play_store = PlayStore()
         self.module_store = ConfigStore()
         self._inflight_creates: set[tuple[int, int, str]] = set()
+        self._cache_dir = CACHE_DIR
+        self._lock_grace_days = max(0, PLAY_ARCHIVED_LOCK_GRACE_DAYS)
 
     def cog_unload(self):
+        self._lock_archived_playthroughs.cancel()
         self.play_store.close()
         self.module_store.close()
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if not self._lock_archived_playthroughs.is_running():
+            self._lock_archived_playthroughs.start()
 
     async def game_autocomplete(
         self,
@@ -481,6 +680,220 @@ class Play(commands.Cog):
                 return None
 
         return channel if isinstance(channel, discord.ForumChannel) else None
+
+    def _configured_play_forums(self, guild_id: int) -> dict[int, set[int]]:
+        config = self.play_store.get_config(guild_id)
+        default_forum_id = config.forum_channel_id if config else None
+        forums: dict[int, set[int]] = {}
+
+        for game in self.play_store.list_games(guild_id):
+            forum_id = game.forum_channel_id or default_forum_id
+            if forum_id is None or game.forum_tag_id is None:
+                continue
+            forums.setdefault(forum_id, set()).add(game.forum_tag_id)
+
+        return forums
+
+    def configured_play_tag_ids_for_forum(
+        self,
+        guild_id: int,
+        forum_channel_id: int,
+    ) -> set[int]:
+        return self._configured_play_forums(guild_id).get(forum_channel_id, set())
+
+    def archived_lock_grace_days(self, grace_days: int | None = None) -> int:
+        return self._lock_grace_days if grace_days is None else max(0, grace_days)
+
+    async def _sweep_archived_playthroughs_for_forum(
+        self,
+        guild: discord.Guild,
+        forum: discord.ForumChannel,
+        configured_tag_ids: set[int],
+        checkpoint: dict[str, object] | None,
+        started_at: datetime,
+        grace_days: int | None = None,
+    ) -> tuple[int, int]:
+        effective_grace_days = self.archived_lock_grace_days(grace_days)
+        archive_stop_at = play_lock_sweep_archive_stop_at(
+            checkpoint,
+            started_at,
+            effective_grace_days,
+        )
+        scanned_count = 0
+        locked_count = 0
+
+        async for thread in forum.archived_threads(limit=None):
+            if thread_archive_timestamp(thread) < archive_stop_at:
+                break
+
+            scanned_count += 1
+            if not should_lock_archived_play_thread(
+                thread,
+                configured_tag_ids=configured_tag_ids,
+                now=started_at,
+                grace_days=effective_grace_days,
+            ):
+                continue
+
+            try:
+                await thread.edit(
+                    archived=True,
+                    locked=True,
+                    reason="Lock inactive archived playthrough post",
+                )
+            except discord.Forbidden:
+                log(
+                    f"PLAY // ARCHIVED LOCK FORBIDDEN 『 THREAD {thread.id} 』 "
+                    f"GUILD 『 {guild.id} 』 FORUM 『 {forum.id} 』",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+            except discord.HTTPException as e:
+                log(
+                    f"PLAY // ARCHIVED LOCK FAILED 『 THREAD {thread.id} 』 "
+                    f"GUILD 『 {guild.id} 』 FORUM 『 {forum.id} 』 // {e}",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+
+            locked_count += 1
+
+        completed_at = _utc_now()
+        save_play_lock_sweep_checkpoint(
+            self._cache_dir,
+            guild_id=guild.id,
+            forum_channel_id=forum.id,
+            started_at=started_at,
+            completed_at=completed_at,
+            archive_stop_at=archive_stop_at,
+            scanned_count=scanned_count,
+            locked_count=locked_count,
+        )
+        return scanned_count, locked_count
+
+    async def run_archived_playthrough_lock_sweep(
+        self,
+        guild: discord.Guild,
+        forum: discord.ForumChannel,
+        *,
+        grace_days: int | None = None,
+        started_at: datetime | None = None,
+    ) -> tuple[int, int] | None:
+        configured_tag_ids = self.configured_play_tag_ids_for_forum(
+            guild.id,
+            forum.id,
+        )
+        if not configured_tag_ids:
+            return None
+
+        checkpoint = load_play_lock_sweep_checkpoint(
+            self._cache_dir,
+            guild.id,
+            forum.id,
+        )
+        return await self._sweep_archived_playthroughs_for_forum(
+            guild,
+            forum,
+            configured_tag_ids,
+            checkpoint,
+            started_at or _utc_now(),
+            grace_days=grace_days,
+        )
+
+    async def _sweep_archived_playthroughs_for_guild(
+        self,
+        guild: discord.Guild,
+        started_at: datetime,
+    ) -> None:
+        if not self.module_store.is_module_enabled(guild.id, MODULE_NAME):
+            return
+
+        bot_member = guild.me
+        if bot_member is None:
+            return
+
+        for forum_id, configured_tag_ids in self._configured_play_forums(
+            guild.id
+        ).items():
+            forum = await self._get_forum_channel(guild, forum_id)
+            if forum is None:
+                continue
+
+            missing_permissions = missing_play_lock_sweep_permissions(
+                forum,
+                bot_member,
+            )
+            if missing_permissions:
+                needed = ", ".join(missing_permissions)
+                log(
+                    f"PLAY // ARCHIVED LOCK SWEEP SKIPPED 『 GUILD {guild.id} 』 "
+                    f"FORUM 『 {forum.id} 』 MISSING 『 {needed} 』",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+
+            checkpoint = load_play_lock_sweep_checkpoint(
+                self._cache_dir,
+                guild.id,
+                forum.id,
+            )
+            if not play_lock_sweep_due(checkpoint, started_at):
+                continue
+
+            try:
+                scanned_count, locked_count = (
+                    await self._sweep_archived_playthroughs_for_forum(
+                        guild,
+                        forum,
+                        configured_tag_ids,
+                        checkpoint,
+                        started_at,
+                    )
+                )
+            except discord.Forbidden:
+                log(
+                    f"PLAY // ARCHIVED LOCK SWEEP FORBIDDEN 『 GUILD {guild.id} 』 "
+                    f"FORUM 『 {forum.id} 』",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+            except discord.HTTPException as e:
+                log(
+                    f"PLAY // ARCHIVED LOCK SWEEP FAILED 『 GUILD {guild.id} 』 "
+                    f"FORUM 『 {forum.id} 』 // {e}",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+            except OSError as e:
+                log(
+                    f"PLAY // ARCHIVED LOCK CHECKPOINT FAILED 『 GUILD {guild.id} 』 "
+                    f"FORUM 『 {forum.id} 』 // {e}",
+                    level="warning",
+                    logger_name="play",
+                )
+                continue
+
+            log(
+                f"PLAY // ARCHIVED LOCK SWEEP COMPLETE 『 GUILD {guild.id} 』 "
+                f"FORUM 『 {forum.id} 』 SCANNED {scanned_count} LOCKED {locked_count}",
+                level="debug",
+                logger_name="play",
+            )
+
+    @tasks.loop(hours=24)
+    async def _lock_archived_playthroughs(self) -> None:
+        started_at = _utc_now()
+        for guild in list(self.bot.guilds):
+            await self._sweep_archived_playthroughs_for_guild(guild, started_at)
+
+    @_lock_archived_playthroughs.before_loop
+    async def _before_lock_archived_playthroughs(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _archive_failed_thread(self, thread: discord.Thread) -> None:
         try:
@@ -623,6 +1036,7 @@ class Play(commands.Cog):
         try:
             await existing_thread.edit(
                 archived=True,
+                locked=True,
                 reason=(
                     f"Replace active playthrough post for "
                     f"{interaction.user} ({interaction.user.id})"

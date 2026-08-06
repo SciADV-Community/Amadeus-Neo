@@ -35,8 +35,11 @@ The bot needs these permissions in every configured playthrough forum channel:
 - Send Messages in Threads
 - Manage Threads
 - Manage Channels
+- Read Message History
 
 `Manage Channels` is required because Spoiler Channel is currently exposed by Discord as a channel flag. discord.py does not expose that setting as a public `ForumChannel.create_thread` or `Thread.edit` parameter yet, so the module uses discord.py's HTTP client to patch the created thread's flags.
+
+`Read Message History` is used by the monthly archived-post lock sweep. If that permission is missing, members can still create playthrough posts, but the bot will skip archived locking for that forum and log a warning.
 
 Members must also have **View Channels** and **Send Messages in Threads** in the configured forum. `/play` will not create a post in a forum the member cannot access.
 
@@ -57,6 +60,7 @@ The `game` option autocompletes from the server's configured games. After the co
 | `/amadeus play remove-game <game>` | Remove a game from `/play` |
 | `/amadeus play list-games` | List configured games and tag bindings |
 | `/amadeus play archive-duration <minutes>` | Set the auto-archive duration used for new playthrough posts |
+| `/amadeus play auto-archive <configured-channel> [grace-days]` | Run the archived post lock sweep now for one configured forum |
 | `/amadeus play config` | Show current configuration and permission status |
 
 `/amadeus play` commands require Amadeus admin access and the `play` module must be enabled on the server.
@@ -74,6 +78,23 @@ The `game` option autocompletes from the server's configured games. After the co
 9. The bot posts the playthrough guidance message inside the thread.
 
 The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username in the post name. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play` usage.
+
+## Archived Post Locking
+
+Discord automatically archives playthrough posts after the configured inactive duration, usually 7 days. Archived posts that are not locked can be reopened by posting in them, so the play module performs a monthly maintenance sweep.
+
+The sweep:
+
+1. Reads configured playthrough forums only.
+2. Lists archived forum posts from newest to oldest.
+3. Considers only posts named like `<game> | @username` with one of that forum's configured game tags.
+4. Skips posts whose last message is newer than `AMADEUS_PLAY_ARCHIVED_LOCK_GRACE_DAYS`.
+5. Locks eligible archived posts with `archived=True` and `locked=True`.
+6. Writes a per-forum checkpoint under `AMADEUS_CACHE_DIR/<guild_id>/play_lock_sweeps/<forum_id>.json`.
+
+The default grace period is `14` days, which gives members another week beyond a 7-day auto-archive window before the bot locks the post. The checkpoint is a cache file, not server configuration; deleting it only causes the next sweep to rescan the recent sweep window.
+
+Admins can run `/amadeus play auto-archive <configured-channel> [grace-days]` to trigger the same lock sweep for one configured playthrough forum immediately. The optional `grace-days` argument only affects that manual run.
 
 ## Database
 
@@ -95,3 +116,6 @@ Discord rejected the Spoiler Channel flag update. Check that the bot has Manage 
 
 **A member can create multiple posts for the same game after an old one archived**
 This is expected. The duplicate check intentionally looks only at active threads so archived forum history does not become an ever-growing lookup path.
+
+**Archived playthrough posts can still be reopened shortly after auto-archive**
+This is expected during the grace period. By default, the monthly lock sweep skips posts whose last message is less than 14 days old.

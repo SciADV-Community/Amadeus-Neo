@@ -11,8 +11,10 @@ from amadeus.play_store import PlayStore
 from cogs.amadeus_admin import attach_amadeus_subgroup, detach_amadeus_subgroup
 from cogs.play import (
     MODULE_NAME,
+    Play as PlayCog,
     find_forum_tag,
     game_name_error,
+    missing_play_lock_sweep_permissions,
     missing_play_forum_permissions,
 )
 
@@ -54,7 +56,8 @@ class PlayAdmin(commands.Cog):
     """
     Admin cog for the play module.
 
-    Commands: /amadeus play set-forum, add-game, remove-game, list-games, archive-duration, config
+    Commands: /amadeus play set-forum, add-game, remove-game, list-games, archive-duration,
+    auto-archive, config
     """
 
     play = app_commands.Group(
@@ -187,7 +190,8 @@ class PlayAdmin(commands.Cog):
         forum = forum or await self._get_default_forum(interaction.guild)
         if forum is None:
             await interaction.response.send_message(
-                "Choose a **forum** for this game or set a default first with `/amadeus play set-forum`.",
+                "Choose a **forum** for this game or set a default first with "
+                "`/amadeus play set-forum`.",
                 ephemeral=True,
             )
             return
@@ -205,19 +209,24 @@ class PlayAdmin(commands.Cog):
             try:
                 tag = await forum.create_tag(
                     name=desired_tag_name,
-                    reason=f"Playthrough game tag added by {interaction.user} ({interaction.user.id})",
+                    reason=(
+                        f"Playthrough game tag added by "
+                        f"{interaction.user} ({interaction.user.id})"
+                    ),
                 )
                 tag_created = True
             except discord.Forbidden:
                 await interaction.response.send_message(
-                    f"I could not create the forum tag **{escape_untrusted_text(desired_tag_name)}**. "
+                    f"I could not create the forum tag "
+                    f"**{escape_untrusted_text(desired_tag_name)}**. "
                     "Check my Manage Channels permission.",
                     ephemeral=True,
                 )
                 return
             except discord.HTTPException as e:
                 await interaction.response.send_message(
-                    f"Discord rejected the forum tag **{escape_untrusted_text(desired_tag_name)}**: `{e}`",
+                    f"Discord rejected the forum tag "
+                    f"**{escape_untrusted_text(desired_tag_name)}**: `{e}`",
                     ephemeral=True,
                 )
                 return
@@ -312,7 +321,11 @@ class PlayAdmin(commands.Cog):
             tag_text = "No tag"
             if forum is not None:
                 tag = find_forum_tag(forum, tag_id=game.forum_tag_id)
-                tag_text = f"Tag: **{escape_untrusted_text(tag.name)}**" if tag else f"Missing tag `{game.forum_tag_id}`"
+                tag_text = (
+                    f"Tag: **{escape_untrusted_text(tag.name)}**"
+                    if tag
+                    else f"Missing tag `{game.forum_tag_id}`"
+                )
             elif game.forum_tag_id is not None:
                 tag_text = f"Tag ID: `{game.forum_tag_id}`"
 
@@ -363,8 +376,135 @@ class PlayAdmin(commands.Cog):
         )
 
         await interaction.response.send_message(
-            f"Playthrough auto-archive duration set to **{archive_duration_label(stored_minutes)}**.",
+            f"Playthrough auto-archive duration set to "
+            f"**{archive_duration_label(stored_minutes)}**.",
             ephemeral=True,
+        )
+
+    # ========================================================
+    # /amadeus play auto-archive
+    # ========================================================
+
+    @play.command(
+        name="auto-archive",
+        description="Lock eligible archived playthrough posts in a configured forum.",
+    )
+    @app_commands.describe(
+        configured_channel="Configured playthrough forum channel to sweep.",
+        grace_days=(
+            "Optional inactive grace period before locking. "
+            "Default: environment setting."
+        ),
+    )
+    async def play_auto_archive(
+        self,
+        interaction: discord.Interaction,
+        configured_channel: discord.ForumChannel,
+        grace_days: int | None = None,
+    ) -> None:
+        config = await require_amadeus_access(interaction, self.module_store)
+        if config is None or interaction.guild is None:
+            return
+
+        if grace_days is not None and not 0 <= grace_days <= 365:
+            await interaction.response.send_message(
+                "Grace days must be between 0 and 365.",
+                ephemeral=True,
+            )
+            return
+
+        play_cog = self.bot.get_cog("Play")
+        if not isinstance(play_cog, PlayCog):
+            await interaction.response.send_message(
+                "The member-facing play cog is not loaded, so I cannot run the "
+                "archived lock sweep.",
+                ephemeral=True,
+            )
+            return
+
+        configured_tag_ids = play_cog.configured_play_tag_ids_for_forum(
+            interaction.guild.id,
+            configured_channel.id,
+        )
+        if not configured_tag_ids:
+            await interaction.response.send_message(
+                f"{configured_channel.mention} is not configured for any `/play` games.",
+                ephemeral=True,
+            )
+            return
+
+        bot_member = interaction.guild.me
+        if bot_member is None:
+            await interaction.response.send_message(
+                "Could not read my server member data.",
+                ephemeral=True,
+            )
+            return
+
+        missing_permissions = missing_play_lock_sweep_permissions(
+            configured_channel,
+            bot_member,
+        )
+        if missing_permissions:
+            needed = ", ".join(f"**{permission}**" for permission in missing_permissions)
+            await interaction.response.send_message(
+                f"I cannot scan and lock archived posts in {configured_channel.mention}.\n\n"
+                f"Grant me: {needed}.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            result = await play_cog.run_archived_playthrough_lock_sweep(
+                interaction.guild,
+                configured_channel,
+                grace_days=grace_days,
+            )
+        except discord.Forbidden:
+            await interaction.edit_original_response(
+                content=(
+                    f"Discord rejected the archived post scan for "
+                    f"{configured_channel.mention}. Check my forum permissions."
+                ),
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.edit_original_response(
+                content=f"Discord rejected the archived lock sweep: `{e}`",
+            )
+            return
+        except OSError as e:
+            await interaction.edit_original_response(
+                content=f"I could not write the archived lock sweep checkpoint: `{e}`",
+            )
+            return
+
+        if result is None:
+            await interaction.edit_original_response(
+                content=f"{configured_channel.mention} is not configured for any `/play` games.",
+            )
+            return
+
+        scanned_count, locked_count = result
+        effective_grace_days = play_cog.archived_lock_grace_days(grace_days)
+        log(
+            f"PLAY // MANUAL ARCHIVED LOCK SWEEP 『 GUILD {interaction.guild.id} 』 "
+            f"FORUM 『 {configured_channel.id} 』 SCANNED {scanned_count} "
+            f"LOCKED {locked_count} GRACE_DAYS {effective_grace_days}",
+            level="debug",
+            logger_name="play",
+        )
+
+        await interaction.edit_original_response(
+            content=(
+                f"Archived playthrough sweep complete for {configured_channel.mention}.\n"
+                f"Scanned **{scanned_count}** archived posts and locked "
+                f"**{locked_count}** eligible posts.\n"
+                f"Grace period: **{effective_grace_days} day"
+                f"{'s' if effective_grace_days != 1 else ''}**."
+            ),
         )
 
     # ========================================================
@@ -403,12 +543,18 @@ class PlayAdmin(commands.Cog):
         )
         embed.add_field(
             name="Default forum",
-            value=default_forum.mention if default_forum is not None else "Not configured",
+            value=(
+                default_forum.mention
+                if default_forum is not None
+                else "Not configured"
+            ),
             inline=True,
         )
         embed.add_field(
             name="Auto-archive",
-            value=archive_duration_label(play_config.auto_archive_duration if play_config else None),
+            value=archive_duration_label(
+                play_config.auto_archive_duration if play_config else None
+            ),
             inline=True,
         )
         embed.add_field(

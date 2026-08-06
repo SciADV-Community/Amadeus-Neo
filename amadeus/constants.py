@@ -13,6 +13,10 @@ from pathlib import Path
 #   AMADEUS_DB_PATH=/app/data/amadeus.sqlite3
 DB_PATH = Path(os.environ.get("AMADEUS_DB_PATH", "amadeus.sqlite3"))
 
+# Runtime cache/checkpoint files. Keep this outside SQLite because these files
+# are operational hints, not server configuration.
+CACHE_DIR = Path(os.environ.get("AMADEUS_CACHE_DIR", "cache"))
+
 
 # ============================================================
 # Verification behavior
@@ -49,12 +53,25 @@ TERMS_OF_SERVICE_URL = os.environ.get("AMADEUS_TERMS_OF_SERVICE_URL", "").strip(
 # ============================================================
 
 # This is intentionally slow because large servers can have 10,000+ users.
-BACKFILL_DELAY_SECONDS = float(os.environ.get("AMADEUS_BACKFILL_DELAY_SECONDS", "1.5"))
-VERIFICATION_ROLE_DELAY_SECONDS = float(os.environ.get("AMADEUS_VERIFICATION_ROLE_DELAY_SECONDS", "5"))
+BACKFILL_DELAY_SECONDS = float(
+    os.environ.get("AMADEUS_BACKFILL_DELAY_SECONDS", "1.5")
+)
+VERIFICATION_ROLE_DELAY_SECONDS = float(
+    os.environ.get("AMADEUS_VERIFICATION_ROLE_DELAY_SECONDS", "5")
+)
 
 BACKFILL_INCLUDE_BOTS_BY_DEFAULT = (
     os.environ.get("AMADEUS_BACKFILL_INCLUDE_BOTS_BY_DEFAULT", "false").lower()
     in {"1", "true", "yes", "y", "on"}
+)
+
+
+# ============================================================
+# Play module behavior
+# ============================================================
+
+PLAY_ARCHIVED_LOCK_GRACE_DAYS = int(
+    os.environ.get("AMADEUS_PLAY_ARCHIVED_LOCK_GRACE_DAYS", "14")
 )
 
 

@@ -2,6 +2,10 @@
 
 ---
 
+### 1.7.5
+- Changed `/play` forum post names to use Discord usernames instead of server nicknames
+- Changed active duplicate handling to offer archiving the existing playthrough before continuing setup
+
 ### 1.7.4
 - Fixed `/amadeus play` admin commands bypassing the server's module-enabled check
 - Fixed `/amadeus play set-forum` incorrectly warning that forum posts require Create Public Threads

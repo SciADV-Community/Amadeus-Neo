@@ -33,7 +33,7 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 Create the bot application in the Discord Developer Portal, then replace `YOUR_CLIENT_ID` in this URL:
 
 ```text
-https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1395059125270&scope=bot%20applications.commands
+https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=1395059190806&scope=bot%20applications.commands
 ```
 
 This invite includes the baseline permissions needed for all current modules:
@@ -43,6 +43,7 @@ This invite includes the baseline permissions needed for all current modules:
 - Embed Links
 - Attach Files
 - Use Application Commands
+- Read Message History
 - Send Messages in Threads
 - Manage Threads
 - Manage Roles
@@ -76,7 +77,7 @@ See each module's documentation for its specific permission requirements.
 | [honeypot](docs/modules/honeypot.md) | Manage Channel, Manage Messages, plus permissions for the chosen action |
 | [boost](docs/modules/boost.md) | Manage Roles, Manage Emojis and Stickers |
 | [activity](docs/modules/activity.md) | Manage Roles |
-| [play](docs/modules/play.md) | Manage Channels, Send Messages / Create Posts, Send Messages in Threads, Manage Threads |
+| [play](docs/modules/play.md) | Manage Channels, Send Messages / Create Posts, Send Messages in Threads, Manage Threads, Read Message History |
 
 ### Privileged Gateway Intents
 
@@ -98,8 +99,10 @@ environment:
   AMADEUS_OWNER_ID: "your-discord-user-id"
   AMADEUS_COGS: "cogs.bouncer,cogs.honeypot,cogs.boost,cogs.activity,cogs.play"
   AMADEUS_DB_PATH: "/app/data/amadeus.sqlite3"
+  AMADEUS_CACHE_DIR: "/app/data/cache"
   AMADEUS_PRIVACY_POLICY_URL: "https://example.com/privacy/"
   AMADEUS_TERMS_OF_SERVICE_URL: "https://example.com/terms/"
+  AMADEUS_PLAY_ARCHIVED_LOCK_GRACE_DAYS: "14"
 ```
 
 `AMADEUS_COGS` controls which optional modules are loaded. Leave it blank to load no optional modules.
@@ -117,7 +120,7 @@ Before starting the container, create the data directory and make it writable by
 sudo install -d -m 0770 -o 10001 -g 10001 /srv/amadeus-neo/data
 ```
 
-The compose file maps `/srv/amadeus-neo/data` on the host to `/app/data` in the container. SQLite stores `amadeus.sqlite3` and its WAL/journal files there.
+The compose file maps `/srv/amadeus-neo/data` on the host to `/app/data` in the container. SQLite stores `amadeus.sqlite3` and its WAL/journal files there. Runtime cache files, such as playthrough lock-sweep checkpoints, are stored under `/app/data/cache`.
 
 Pull and start the bot:
 

@@ -23,6 +23,7 @@ data/
 *.pid
 
 # Tooling caches
+cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

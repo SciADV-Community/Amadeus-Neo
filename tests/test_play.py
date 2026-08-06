@@ -1,25 +1,35 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
 import pytest
 
+import cogs.play_admin as play_admin_module
 from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, PlayAdmin, tag_name_error
 from cogs.play import (
     MAX_FORUM_THREAD_TAGS,
+    PLAY_LOCK_SWEEP_INITIAL_LOOKBACK_DAYS,
     Play,
     SPOILER_CHANNEL_FLAG,
     additional_spoiler_tags,
     calculate_spoiler_flags,
     find_active_play_thread,
+    load_play_lock_sweep_checkpoint,
     find_forum_tag,
     format_play_thread_name,
     game_name_error,
     mark_thread_spoiler,
     missing_member_play_forum_permissions,
+    missing_play_lock_sweep_permissions,
     missing_play_forum_permissions,
+    play_lock_sweep_archive_stop_at,
+    play_lock_sweep_checkpoint_path,
+    play_lock_sweep_due,
     resolve_additional_spoiler_tags,
+    save_play_lock_sweep_checkpoint,
+    should_lock_archived_play_thread,
     thread_has_tag,
     thread_name_matches_player,
     thread_name_matches_playthrough,
@@ -52,19 +62,58 @@ class FakeInteraction:
         self.guild = guild
         self.guild_id = getattr(guild, "id", None)
         self.user = user or SimpleNamespace(id=1)
+        self.response = SimpleNamespace(
+            sent_messages=[],
+            defers=[],
+            send_message=AsyncMock(side_effect=self._record_send_message),
+            defer=AsyncMock(side_effect=self._record_defer),
+        )
         self.edits = []
+
+    async def _record_send_message(self, *args, **kwargs):
+        self.response.sent_messages.append((args, kwargs))
+
+    async def _record_defer(self, *args, **kwargs):
+        self.response.defers.append((args, kwargs))
 
     async def edit_original_response(self, **kwargs):
         self.edits.append(kwargs)
 
 
 class FakeThread:
-    def __init__(self, *, name, parent_id, tags, mention="#thread"):
+    def __init__(
+        self,
+        *,
+        name,
+        parent_id,
+        tags,
+        mention="#thread",
+        thread_id=100,
+        archived=True,
+        locked=False,
+        archive_timestamp=None,
+        created_at=None,
+        last_message_id=None,
+    ):
+        self.id = thread_id
         self.name = name
         self.parent_id = parent_id
         self.applied_tags = tags
         self._applied_tags = []
         self.mention = mention
+        self.archived = archived
+        self.locked = locked
+        self.archive_timestamp = archive_timestamp
+        self.created_at = created_at or datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.last_message_id = last_message_id
+        self.edit_calls = []
+
+    async def edit(self, **kwargs):
+        self.edit_calls.append(kwargs)
+        if "locked" in kwargs:
+            self.locked = kwargs["locked"]
+        if "archived" in kwargs:
+            self.archived = kwargs["archived"]
 
 
 def test_game_name_validation_rejects_empty_long_control_and_mentions():
@@ -233,6 +282,301 @@ def test_missing_member_play_forum_permissions_checks_member_access_only():
     assert missing_member_play_forum_permissions(forum, SimpleNamespace()) == [
         "View Channels",
     ]
+
+
+def test_missing_play_lock_sweep_permissions_requires_history_and_manage_threads():
+    permissions = SimpleNamespace(
+        view_channel=True,
+        read_message_history=False,
+        manage_threads=False,
+    )
+    forum = FakeForum([], permissions)
+
+    assert missing_play_lock_sweep_permissions(forum, SimpleNamespace()) == [
+        "Read Message History",
+        "Manage Threads",
+    ]
+
+
+def test_play_lock_sweep_checkpoint_round_trips(tmp_path):
+    started_at = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    completed_at = started_at + timedelta(seconds=5)
+    archive_stop_at = started_at - timedelta(days=14)
+
+    save_play_lock_sweep_checkpoint(
+        tmp_path,
+        guild_id=1,
+        forum_channel_id=2,
+        started_at=started_at,
+        completed_at=completed_at,
+        archive_stop_at=archive_stop_at,
+        scanned_count=9,
+        locked_count=3,
+    )
+
+    path = play_lock_sweep_checkpoint_path(tmp_path, 1, 2)
+    checkpoint = load_play_lock_sweep_checkpoint(tmp_path, 1, 2)
+
+    assert path == tmp_path / "1" / "play_lock_sweeps" / "2.json"
+    assert path.exists()
+    assert checkpoint["guild_id"] == "1"
+    assert checkpoint["forum_channel_id"] == "2"
+    assert checkpoint["last_scanned_count"] == 9
+    assert checkpoint["last_locked_count"] == 3
+
+
+def test_play_lock_sweep_due_uses_completed_checkpoint_time():
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    checkpoint = {
+        "last_sweep_completed_at": "2026-08-01T00:00:00+00:00",
+    }
+
+    assert play_lock_sweep_due(checkpoint, now) is True
+    assert play_lock_sweep_due(checkpoint, now - timedelta(days=1)) is False
+    assert play_lock_sweep_due(None, now) is True
+
+
+def test_play_lock_sweep_archive_stop_overlaps_by_grace_window():
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    checkpoint = {
+        "last_sweep_started_at": "2026-08-01T00:00:00+00:00",
+    }
+
+    assert play_lock_sweep_archive_stop_at(checkpoint, now, 14) == datetime(
+        2026,
+        7,
+        18,
+        tzinfo=timezone.utc,
+    )
+    assert play_lock_sweep_archive_stop_at(None, now, 14) == now - timedelta(
+        days=PLAY_LOCK_SWEEP_INITIAL_LOOKBACK_DAYS
+    )
+
+
+def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts():
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    old_message_id = discord.utils.time_snowflake(now - timedelta(days=15))
+    recent_message_id = discord.utils.time_snowflake(now - timedelta(days=10))
+    old_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        archive_timestamp=now - timedelta(days=8),
+        last_message_id=old_message_id,
+    )
+
+    assert should_lock_archived_play_thread(
+        old_thread,
+        configured_tag_ids={10},
+        now=now,
+        grace_days=14,
+    ) is True
+    assert should_lock_archived_play_thread(
+        FakeThread(
+            name="Steins;Gate | @zips",
+            parent_id=20,
+            tags=[tag],
+            locked=True,
+            last_message_id=old_message_id,
+        ),
+        configured_tag_ids={10},
+        now=now,
+        grace_days=14,
+    ) is False
+    assert should_lock_archived_play_thread(
+        FakeThread(
+            name="Steins;Gate | @zips",
+            parent_id=20,
+            tags=[tag],
+            last_message_id=recent_message_id,
+        ),
+        configured_tag_ids={10},
+        now=now,
+        grace_days=14,
+    ) is False
+    assert should_lock_archived_play_thread(
+        FakeThread(
+            name="Steins;Gate | @zips",
+            parent_id=20,
+            tags=[SimpleNamespace(id=99)],
+            last_message_id=old_message_id,
+        ),
+        configured_tag_ids={10},
+        now=now,
+        grace_days=14,
+    ) is False
+    assert should_lock_archived_play_thread(
+        FakeThread(
+            name="General spoilers",
+            parent_id=20,
+            tags=[tag],
+            last_message_id=old_message_id,
+        ),
+        configured_tag_ids={10},
+        now=now,
+        grace_days=14,
+    ) is False
+
+
+def test_archived_playthrough_sweep_locks_old_threads_and_writes_checkpoint(
+    temp_db_path,
+    tmp_path,
+):
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    eligible_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        archive_timestamp=now - timedelta(days=8),
+        last_message_id=discord.utils.time_snowflake(now - timedelta(days=15)),
+    )
+    recent_thread = FakeThread(
+        name="Steins;Gate 0 | @zips",
+        parent_id=20,
+        tags=[tag],
+        archive_timestamp=now - timedelta(days=3),
+        last_message_id=discord.utils.time_snowflake(now - timedelta(days=10)),
+    )
+    out_of_window_thread = FakeThread(
+        name="Steins;Gate | @kurisu",
+        parent_id=20,
+        tags=[tag],
+        archive_timestamp=now - timedelta(days=45),
+        last_message_id=discord.utils.time_snowflake(now - timedelta(days=60)),
+    )
+
+    class Forum:
+        id = 20
+
+        def archived_threads(self, *, limit=None):
+            async def iterator():
+                yield eligible_thread
+                yield recent_thread
+                yield out_of_window_thread
+
+            return iterator()
+
+    cog = Play(SimpleNamespace())
+    cog._cache_dir = tmp_path
+
+    try:
+        scanned_count, locked_count = asyncio.run(
+            cog._sweep_archived_playthroughs_for_forum(
+                SimpleNamespace(id=1),
+                Forum(),
+                {10},
+                None,
+                now,
+            )
+        )
+    finally:
+        cog.cog_unload()
+
+    assert scanned_count == 2
+    assert locked_count == 1
+    assert eligible_thread.edit_calls == [
+        {
+            "archived": True,
+            "locked": True,
+            "reason": "Lock inactive archived playthrough post",
+        }
+    ]
+    assert recent_thread.edit_calls == []
+    assert load_play_lock_sweep_checkpoint(tmp_path, 1, 20)["last_locked_count"] == 1
+
+
+def test_play_auto_archive_command_runs_manual_sweep(temp_db_path, monkeypatch):
+    async def allow_access(interaction, store):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(play_admin_module, "require_amadeus_access", allow_access)
+
+    permissions = SimpleNamespace(
+        view_channel=True,
+        read_message_history=True,
+        manage_threads=True,
+    )
+    channel = SimpleNamespace(
+        id=20,
+        mention="#playthroughs",
+        permissions_for=lambda member: permissions,
+    )
+    guild = SimpleNamespace(id=1, me=SimpleNamespace())
+    interaction = FakeInteraction(guild)
+    play_cog = Play(SimpleNamespace())
+    play_cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    play_cog.run_archived_playthrough_lock_sweep = AsyncMock(return_value=(6, 4))
+    bot = SimpleNamespace(get_cog=lambda name: play_cog if name == "Play" else None)
+    admin_cog = PlayAdmin(bot)
+
+    try:
+        asyncio.run(
+            PlayAdmin.play_auto_archive.callback(
+                admin_cog,
+                interaction,
+                channel,
+                21,
+            )
+        )
+    finally:
+        admin_cog.cog_unload()
+        play_cog.cog_unload()
+
+    interaction.response.defer.assert_awaited_once_with(
+        ephemeral=True,
+        thinking=True,
+    )
+    play_cog.run_archived_playthrough_lock_sweep.assert_awaited_once_with(
+        guild,
+        channel,
+        grace_days=21,
+    )
+    assert interaction.edits == [
+        {
+            "content": (
+                "Archived playthrough sweep complete for #playthroughs.\n"
+                "Scanned **6** archived posts and locked **4** eligible posts.\n"
+                "Grace period: **21 days**."
+            ),
+        }
+    ]
+
+
+def test_play_auto_archive_command_rejects_unconfigured_forum(
+    temp_db_path,
+    monkeypatch,
+):
+    async def allow_access(interaction, store):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(play_admin_module, "require_amadeus_access", allow_access)
+
+    guild = SimpleNamespace(id=1, me=SimpleNamespace())
+    interaction = FakeInteraction(guild)
+    channel = SimpleNamespace(id=20, mention="#general")
+    play_cog = Play(SimpleNamespace())
+    bot = SimpleNamespace(get_cog=lambda name: play_cog if name == "Play" else None)
+    admin_cog = PlayAdmin(bot)
+
+    try:
+        asyncio.run(
+            PlayAdmin.play_auto_archive.callback(
+                admin_cog,
+                interaction,
+                channel,
+                None,
+            )
+        )
+    finally:
+        admin_cog.cog_unload()
+        play_cog.cog_unload()
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "#general is not configured for any `/play` games.",
+        ephemeral=True,
+    )
 
 
 def test_play_admin_interaction_check_requires_enabled_module():

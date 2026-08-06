@@ -101,6 +101,7 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
             "remove-game",
             "list-games",
             "archive-duration",
+            "auto-archive",
             "config",
         }
     finally:

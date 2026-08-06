@@ -52,10 +52,14 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
 
         amadeus = bot.get_cog("AmadeusAdmin").amadeus
 
-        assert {"activity", "boost", "bouncer", "honeypot", "play"}.issubset(
+        assert {"activity", "boost", "bouncer", "debug", "honeypot", "play"}.issubset(
             command_names(amadeus)
         )
 
+        assert command_names(amadeus._children["debug"]) == {
+            "ping",
+            "reacts",
+        }
         assert command_names(amadeus._children["activity"]) == {
             "status",
             "tier-add",

@@ -586,6 +586,27 @@ class AmadeusAdmin(commands.Cog):
     async def debug_ping(self, interaction: discord.Interaction):
         await debug.cmd_ping(interaction)
 
+    @amadeus_debug.command(
+        name="reacts",
+        description="List usernames that reacted to a message with an emoji.",
+    )
+    @app_commands.describe(
+        post_id="Message ID or link to inspect in this channel.",
+        emoji="Reaction emoji to inspect.",
+    )
+    async def debug_reacts(
+        self,
+        interaction: discord.Interaction,
+        post_id: app_commands.Range[str, 1, 128],
+        emoji: app_commands.Range[str, 1, 128],
+    ):
+        config = await require_amadeus_access(interaction, self.store)
+
+        if config is None or interaction.guild is None:
+            return
+
+        await debug.cmd_reacts(interaction, post_id, emoji)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AmadeusAdmin(bot))

@@ -500,6 +500,7 @@ def test_play_auto_archive_command_runs_manual_sweep(temp_db_path, monkeypatch):
     )
     channel = SimpleNamespace(
         id=20,
+        name="steins-gate",
         mention="#playthroughs",
         permissions_for=lambda member: permissions,
     )
@@ -510,13 +511,14 @@ def test_play_auto_archive_command_runs_manual_sweep(temp_db_path, monkeypatch):
     play_cog.run_archived_playthrough_lock_sweep = AsyncMock(return_value=(6, 4))
     bot = SimpleNamespace(get_cog=lambda name: play_cog if name == "Play" else None)
     admin_cog = PlayAdmin(bot)
+    admin_cog._get_forum_channel = AsyncMock(return_value=channel)
 
     try:
         asyncio.run(
             PlayAdmin.play_auto_archive.callback(
                 admin_cog,
                 interaction,
-                channel,
+                str(channel.id),
                 21,
             )
         )
@@ -555,17 +557,17 @@ def test_play_auto_archive_command_rejects_unconfigured_forum(
 
     guild = SimpleNamespace(id=1, me=SimpleNamespace())
     interaction = FakeInteraction(guild)
-    channel = SimpleNamespace(id=20, mention="#general")
     play_cog = Play(SimpleNamespace())
     bot = SimpleNamespace(get_cog=lambda name: play_cog if name == "Play" else None)
     admin_cog = PlayAdmin(bot)
+    admin_cog._get_forum_channel = AsyncMock()
 
     try:
         asyncio.run(
             PlayAdmin.play_auto_archive.callback(
                 admin_cog,
                 interaction,
-                channel,
+                "20",
                 None,
             )
         )
@@ -574,9 +576,43 @@ def test_play_auto_archive_command_rejects_unconfigured_forum(
         play_cog.cog_unload()
 
     interaction.response.send_message.assert_awaited_once_with(
-        "#general is not configured for any `/play` games.",
+        "`20` is not configured for any `/play` games.",
         ephemeral=True,
     )
+    admin_cog._get_forum_channel.assert_not_awaited()
+
+
+def test_play_auto_archive_autocomplete_lists_only_configured_forums(temp_db_path):
+    configured_channel = SimpleNamespace(id=20, name="steins-gate")
+    unconfigured_channel = SimpleNamespace(id=30, name="general")
+
+    class Guild:
+        id = 1
+
+        def get_channel(self, channel_id):
+            return {
+                20: configured_channel,
+                30: unconfigured_channel,
+            }.get(channel_id)
+
+    interaction = SimpleNamespace(guild=Guild())
+    admin_cog = PlayAdmin(SimpleNamespace(get_cog=lambda name: None))
+    admin_cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        choices = asyncio.run(
+            PlayAdmin.configured_forum_autocomplete(
+                admin_cog,
+                interaction,
+                "",
+            )
+        )
+    finally:
+        admin_cog.cog_unload()
+
+    assert [(choice.name, choice.value) for choice in choices] == [
+        ("#steins-gate (1 games)", "20")
+    ]
 
 
 def test_play_admin_interaction_check_requires_enabled_module():

@@ -52,6 +52,15 @@ def archive_duration_label(minutes: int | None) -> str:
     return labels.get(minutes, f"{minutes} minutes")
 
 
+def parse_channel_id(value: str) -> int | None:
+    value = value.strip()
+    if value.startswith("<#") and value.endswith(">"):
+        value = value[2:-1]
+    if not value.isdigit():
+        return None
+    return int(value)
+
+
 class PlayAdmin(commands.Cog):
     """
     Admin cog for the play module.
@@ -92,6 +101,50 @@ class PlayAdmin(commands.Cog):
             app_commands.Choice(name=game.display_name, value=game.key)
             for game in self.play_store.search_games(interaction.guild_id, current)
         ]
+
+    async def configured_forum_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if interaction.guild is None:
+            return []
+
+        config = self.play_store.get_config(interaction.guild.id)
+        default_forum_id = config.forum_channel_id if config else None
+        forum_game_counts: dict[int, int] = {}
+
+        for game in self.play_store.list_games(interaction.guild.id):
+            forum_id = game.forum_channel_id or default_forum_id
+            if forum_id is None:
+                continue
+            forum_game_counts[forum_id] = forum_game_counts.get(forum_id, 0) + 1
+
+        normalized_current = current.strip().casefold()
+        choices: list[app_commands.Choice[str]] = []
+
+        for forum_id, game_count in sorted(forum_game_counts.items()):
+            channel = interaction.guild.get_channel(forum_id)
+            channel_name = getattr(channel, "name", None)
+            label = (
+                f"#{channel_name} ({game_count} games)"
+                if channel_name
+                else f"Forum {forum_id} ({game_count} games)"
+            )
+            searchable = f"{label} {forum_id}".casefold()
+            if normalized_current and normalized_current not in searchable:
+                continue
+
+            choices.append(
+                app_commands.Choice(
+                    name=label[:100],
+                    value=str(forum_id),
+                )
+            )
+            if len(choices) >= 25:
+                break
+
+        return choices
 
     async def _get_forum_channel(
         self,
@@ -396,10 +449,11 @@ class PlayAdmin(commands.Cog):
             "Default: environment setting."
         ),
     )
+    @app_commands.autocomplete(configured_channel=configured_forum_autocomplete)
     async def play_auto_archive(
         self,
         interaction: discord.Interaction,
-        configured_channel: discord.ForumChannel,
+        configured_channel: str,
         grace_days: int | None = None,
     ) -> None:
         config = await require_amadeus_access(interaction, self.module_store)
@@ -409,6 +463,14 @@ class PlayAdmin(commands.Cog):
         if grace_days is not None and not 0 <= grace_days <= 365:
             await interaction.response.send_message(
                 "Grace days must be between 0 and 365.",
+                ephemeral=True,
+            )
+            return
+
+        configured_channel_id = parse_channel_id(configured_channel)
+        if configured_channel_id is None:
+            await interaction.response.send_message(
+                "Choose a configured playthrough forum from autocomplete.",
                 ephemeral=True,
             )
             return
@@ -424,11 +486,22 @@ class PlayAdmin(commands.Cog):
 
         configured_tag_ids = play_cog.configured_play_tag_ids_for_forum(
             interaction.guild.id,
-            configured_channel.id,
+            configured_channel_id,
         )
         if not configured_tag_ids:
             await interaction.response.send_message(
-                f"{configured_channel.mention} is not configured for any `/play` games.",
+                f"`{configured_channel_id}` is not configured for any `/play` games.",
+                ephemeral=True,
+            )
+            return
+
+        resolved_channel = await self._get_forum_channel(
+            interaction.guild,
+            configured_channel_id,
+        )
+        if resolved_channel is None:
+            await interaction.response.send_message(
+                "That configured playthrough forum is missing or is no longer a forum.",
                 ephemeral=True,
             )
             return
@@ -442,13 +515,13 @@ class PlayAdmin(commands.Cog):
             return
 
         missing_permissions = missing_play_lock_sweep_permissions(
-            configured_channel,
+            resolved_channel,
             bot_member,
         )
         if missing_permissions:
             needed = ", ".join(f"**{permission}**" for permission in missing_permissions)
             await interaction.response.send_message(
-                f"I cannot scan and lock archived posts in {configured_channel.mention}.\n\n"
+                f"I cannot scan and lock archived posts in {resolved_channel.mention}.\n\n"
                 f"Grant me: {needed}.",
                 ephemeral=True,
             )
@@ -459,14 +532,14 @@ class PlayAdmin(commands.Cog):
         try:
             result = await play_cog.run_archived_playthrough_lock_sweep(
                 interaction.guild,
-                configured_channel,
+                resolved_channel,
                 grace_days=grace_days,
             )
         except discord.Forbidden:
             await interaction.edit_original_response(
                 content=(
                     f"Discord rejected the archived post scan for "
-                    f"{configured_channel.mention}. Check my forum permissions."
+                    f"{resolved_channel.mention}. Check my forum permissions."
                 ),
             )
             return
@@ -483,7 +556,10 @@ class PlayAdmin(commands.Cog):
 
         if result is None:
             await interaction.edit_original_response(
-                content=f"{configured_channel.mention} is not configured for any `/play` games.",
+                content=(
+                    f"{resolved_channel.mention} is not configured for any "
+                    "`/play` games."
+                ),
             )
             return
 
@@ -491,7 +567,7 @@ class PlayAdmin(commands.Cog):
         effective_grace_days = play_cog.archived_lock_grace_days(grace_days)
         log(
             f"PLAY // MANUAL ARCHIVED LOCK SWEEP 『 GUILD {interaction.guild.id} 』 "
-            f"FORUM 『 {configured_channel.id} 』 SCANNED {scanned_count} "
+            f"FORUM 『 {resolved_channel.id} 』 SCANNED {scanned_count} "
             f"LOCKED {locked_count} GRACE_DAYS {effective_grace_days}",
             level="debug",
             logger_name="play",
@@ -499,7 +575,7 @@ class PlayAdmin(commands.Cog):
 
         await interaction.edit_original_response(
             content=(
-                f"Archived playthrough sweep complete for {configured_channel.mention}.\n"
+                f"Archived playthrough sweep complete for {resolved_channel.mention}.\n"
                 f"Scanned **{scanned_count}** archived posts and locked "
                 f"**{locked_count}** eligible posts.\n"
                 f"Grace period: **{effective_grace_days} day"

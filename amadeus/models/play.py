@@ -13,6 +13,7 @@ class PlayGame:
     guild_id: int
     key: str
     display_name: str
+    sort_order: int = 0
     forum_channel_id: int | None = None
     forum_tag_id: int | None = None
     enabled: bool = True

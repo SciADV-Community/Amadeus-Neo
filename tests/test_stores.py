@@ -188,23 +188,61 @@ def test_play_store_tracks_config_and_games(temp_db_path):
         gate = store.save_game(1, "Steins;Gate", 100, 200)
         zero = store.save_game(1, "Steins;Gate 0", 101, 201)
         assert gate.key == "steins;gate"
+        assert gate.sort_order == 1
         assert gate.forum_channel_id == 100
         assert zero.key == "steins;gate 0"
+        assert zero.sort_order == 2
         assert zero.forum_channel_id == 101
 
         updated = store.save_game(1, "steins;gate", 102, 202)
         assert updated.display_name == "steins;gate"
+        assert updated.sort_order == 1
         assert updated.forum_channel_id == 102
         assert updated.forum_tag_id == 202
         assert store.get_game(1, "STEINS;GATE").forum_tag_id == 202
 
+        chaos = store.save_game(1, "Chaos;Head NoAH", 103, 203, sort_order=1)
+        assert chaos.sort_order == 1
+        assert [(game.key, game.sort_order) for game in store.list_games(1)] == [
+            ("chaos;head noah", 1),
+            ("steins;gate", 2),
+            ("steins;gate 0", 3),
+        ]
+
+        moved = store.set_game_order(1, "Steins;Gate 0", 1)
+        assert moved.sort_order == 1
+        assert [(game.key, game.sort_order) for game in store.list_games(1)] == [
+            ("steins;gate 0", 1),
+            ("chaos;head noah", 2),
+            ("steins;gate", 3),
+        ]
+
         assert [game.key for game in store.search_games(1, "gate")] == [
-            "steins;gate",
             "steins;gate 0",
+            "steins;gate",
         ]
         assert store.remove_game(1, "steins;gate 0") is True
         assert store.remove_game(1, "missing") is False
-        assert [game.key for game in store.list_games(1)] == ["steins;gate"]
+        assert [(game.key, game.sort_order) for game in store.list_games(1)] == [
+            ("chaos;head noah", 1),
+            ("steins;gate", 2),
+        ]
+
+        assert store.configured_forum_ids(1) == {100, 102, 103}
+        assert [game.key for game in store.games_for_forum(1, 103)] == [
+            "chaos;head noah"
+        ]
+        removed_games, removed_default = store.remove_forum(1, 103)
+        assert [game.key for game in removed_games] == ["chaos;head noah"]
+        assert removed_default is False
+        assert [(game.key, game.sort_order) for game in store.list_games(1)] == [
+            ("steins;gate", 1),
+        ]
+
+        removed_games, removed_default = store.remove_forum(1, 100)
+        assert removed_games == []
+        assert removed_default is True
+        assert store.get_config(1).forum_channel_id is None
     finally:
         store.close()
 
@@ -258,6 +296,8 @@ def test_play_store_migrates_games_from_default_forum(temp_db_path):
 
     store = PlayStore()
     try:
-        assert store.get_game(1, "Steins;Gate").forum_channel_id == 100
+        game = store.get_game(1, "Steins;Gate")
+        assert game.forum_channel_id == 100
+        assert game.sort_order == 1
     finally:
         store.close()

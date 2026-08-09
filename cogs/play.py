@@ -1,6 +1,7 @@
+import asyncio
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ SPOILER_CHANNEL_FLAG = 1 << 21
 MAX_PLAY_THREAD_NAME_LENGTH = 100
 MAX_GAME_NAME_LENGTH = 80
 MAX_FORUM_THREAD_TAGS = 5
+MAX_ADDITIONAL_SPOILER_TAGS = MAX_FORUM_THREAD_TAGS - 1
 PLAY_LOCK_SWEEP_INTERVAL_DAYS = 30
 PLAY_LOCK_SWEEP_INITIAL_LOOKBACK_DAYS = (
     PLAY_LOCK_SWEEP_INTERVAL_DAYS + PLAY_ARCHIVED_LOCK_GRACE_DAYS
@@ -61,6 +63,11 @@ _PLAY_MESSAGE_MANAGEMENT_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
 _PLAY_THREAD_MANAGEMENT_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
     ("manage_threads", "Manage Threads"),
 )
+_PLAY_BOT_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
+    *_PLAY_FORUM_REQUIRED_PERMS,
+    ("manage_messages", "Manage Messages"),
+    ("read_message_history", "Read Message History"),
+)
 _PLAY_THREAD_OWNER_SEPARATOR = " | @"
 _PLAY_CONTEXT_MENU_NAMES: tuple[str, ...] = (
     "Delete Message",
@@ -70,6 +77,8 @@ _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE = (
     "You can not delete bot or moderator messages."
 )
 _PLAY_MODAL_OPTION_LIMIT = 25
+_PLAY_MODAL_TIMEOUT_SECONDS = 900
+_PLAY_INITIAL_RESPONSE_FALLBACK_SECONDS = 2.2
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,16 @@ class PlayCreateContext:
     forum: discord.ForumChannel
     required_tag: discord.ForumTag
     auto_archive_duration: int | None
+
+
+@dataclass(frozen=True)
+class PlayForumGameGroup:
+    forum: discord.ForumChannel
+    games: tuple[PlayGame, ...]
+
+
+class PlayThreadLookupError(RuntimeError):
+    """Raised when a playthrough thread lookup cannot complete safely."""
 
 
 def _utc_now() -> datetime:
@@ -251,7 +270,7 @@ def play_thread_game_name(name: str) -> str | None:
 def should_lock_archived_play_thread(
     thread: discord.Thread,
     *,
-    configured_tag_ids: set[int],
+    configured_game_names: set[str],
     now: datetime,
     grace_days: int,
 ) -> bool:
@@ -260,6 +279,9 @@ def should_lock_archived_play_thread(
     if getattr(thread, "archived", True) is False:
         return False
     if not is_playthrough_thread_name(thread.name):
+        return False
+    game_name = play_thread_game_name(thread.name)
+    if game_name is None or _normalized_play_game_name(game_name) not in configured_game_names:
         return False
 
     lock_before = _coerce_utc(now) - timedelta(days=max(0, grace_days))
@@ -282,6 +304,10 @@ def game_name_error(name: str) -> str | None:
 def _clean_thread_name_part(value: str) -> str:
     value = _CONTROL_OR_BIDI_RE.sub("", value)
     return re.sub(r"\s+", " ", value).strip() or "unknown"
+
+
+def _normalized_play_game_name(value: str) -> str:
+    return _clean_thread_name_part(value).casefold()
 
 
 def _member_username(member: discord.Member) -> str:
@@ -368,6 +394,7 @@ def _looks_like_thread_channel(channel: object) -> bool:
 def configured_playthrough_thread_context(
     channel: object,
     configured_forums: Mapping[int, set[int]],
+    configured_game_names: Mapping[int, set[str]] | None = None,
 ) -> tuple[PlayThreadContext | None, str | None]:
     if not _looks_like_thread_channel(channel):
         return None, "This must be used in a forum post/thread."
@@ -379,6 +406,17 @@ def configured_playthrough_thread_context(
 
     if not is_playthrough_thread_name(channel.name):
         return None, "This thread is not named like a playthrough post."
+
+    game_name = play_thread_game_name(channel.name)
+    game_names = (
+        configured_game_names.get(parent_id, set())
+        if configured_game_names is not None
+        else set()
+    )
+    if game_names and (
+        game_name is None or _normalized_play_game_name(game_name) not in game_names
+    ):
+        return None, "This thread is not named for a configured playthrough game."
 
     matched_tag_ids = frozenset(
         tag_id
@@ -398,6 +436,7 @@ def configured_playthrough_thread_context(
 async def find_active_owned_playthrough_threads(
     guild: discord.Guild,
     configured_forums: Mapping[int, set[int]],
+    configured_game_names: Mapping[int, set[str]],
     member: discord.Member,
 ) -> list[discord.Thread]:
     active_threads = await guild.active_threads()
@@ -410,6 +449,7 @@ async def find_active_owned_playthrough_threads(
         context, _ = configured_playthrough_thread_context(
             thread,
             configured_forums,
+            configured_game_names,
         )
         if context is None:
             continue
@@ -458,15 +498,15 @@ def missing_play_thread_management_permissions(
     )
 
 
-def additional_spoiler_tags(
+def missing_play_required_bot_permissions(
     forum: discord.ForumChannel,
-    required_tag: discord.ForumTag,
-) -> list[discord.ForumTag]:
-    return [
-        tag
-        for tag in forum.available_tags
-        if tag.id != required_tag.id
-    ]
+    member: discord.Member,
+) -> list[str]:
+    return _missing_permissions(
+        forum,
+        member,
+        _PLAY_BOT_REQUIRED_PERMS,
+    )
 
 
 def resolve_additional_spoiler_tags(
@@ -491,9 +531,11 @@ def resolve_additional_spoiler_tags(
         normalized_tag_ids.append(tag_id)
         seen_ids.add(tag_id)
 
-    max_additional_tags = MAX_FORUM_THREAD_TAGS - (1 if game_tag_applied else 0)
-    if len(normalized_tag_ids) > max_additional_tags:
-        return [], f"Select at most **{max_additional_tags}** additional spoiler tags."
+    if len(normalized_tag_ids) > MAX_ADDITIONAL_SPOILER_TAGS:
+        return (
+            [],
+            f"Select at most **{MAX_ADDITIONAL_SPOILER_TAGS}** additional spoiler tags.",
+        )
 
     resolved: list[discord.ForumTag] = []
     for tag_id in normalized_tag_ids:
@@ -565,20 +607,10 @@ async def find_active_play_threads(
     return matches
 
 
-async def find_active_play_thread(
-    guild: discord.Guild,
-    forum: discord.ForumChannel,
-    game: PlayGame,
-    tag: discord.ForumTag,
-    member: discord.Member,
-) -> discord.Thread | None:
-    matches = await find_active_play_threads(guild, forum, game, member)
-    return matches[0] if matches else None
-
-
 async def find_active_play_threads_by_name(
     guild: discord.Guild,
     configured_forums: Mapping[int, set[int]],
+    configured_game_names: Mapping[int, set[str]],
     *,
     game_name: str,
     member: discord.Member,
@@ -596,6 +628,7 @@ async def find_active_play_threads_by_name(
         context, _ = configured_playthrough_thread_context(
             thread,
             configured_forums,
+            configured_game_names,
         )
         if context is None:
             continue
@@ -645,121 +678,6 @@ def missing_play_lock_sweep_permissions(
     ]
 
 
-class _AdditionalSpoilerSelect(discord.ui.Select):
-    def __init__(self, tags: list[discord.ForumTag], *, max_tags: int) -> None:
-        options = [
-            discord.SelectOption(
-                label=tag.name or f"Tag {tag.id}",
-                value=str(tag.id),
-            )
-            for tag in tags
-        ]
-        super().__init__(
-            placeholder="Additional spoiler tags",
-            min_values=0,
-            max_values=min(max_tags, len(options)),
-            options=options,
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.view
-        if isinstance(view, _PlaySpoilerTagView):
-            view.selected_tag_ids = [int(value) for value in self.values]
-        await interaction.response.defer()
-
-
-class _PlaySpoilerTagView(discord.ui.View):
-    def __init__(
-        self,
-        *,
-        cog: "Play",
-        requester_id: int,
-        guild_id: int,
-        forum: discord.ForumChannel,
-        play_game: PlayGame,
-        required_tag: discord.ForumTag,
-        replay: bool,
-        auto_archive_duration: int | None,
-    ) -> None:
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.requester_id = requester_id
-        self.guild_id = guild_id
-        self.forum = forum
-        self.play_game = play_game
-        self.required_tag = required_tag
-        self.replay = replay
-        self.auto_archive_duration = auto_archive_duration
-        self.selected_tag_ids: list[int] = []
-        self.message: discord.InteractionMessage | None = None
-
-        selectable_tags = additional_spoiler_tags(forum, required_tag)
-        if selectable_tags:
-            max_tags = MAX_FORUM_THREAD_TAGS - (1 if replay else 0)
-            self.add_item(_AdditionalSpoilerSelect(selectable_tags, max_tags=max_tags))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message(
-                "Only the user who started this playthrough can use these controls.",
-                ephemeral=True,
-            )
-            return False
-        if interaction.guild_id != self.guild_id:
-            await interaction.response.send_message(
-                "This playthrough setup is no longer valid.",
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    async def on_timeout(self) -> None:
-        if self.message is None:
-            return
-
-        try:
-            await self.message.edit(
-                content="Playthrough setup timed out.",
-                view=None,
-            )
-        except discord.HTTPException:
-            pass
-
-    @discord.ui.button(label="Create", style=discord.ButtonStyle.success, row=1)
-    async def create(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.edit_message(
-            content="Creating your playthrough post...",
-            view=None,
-        )
-        self.stop()
-        await self.cog.create_playthrough_thread(
-            interaction,
-            forum=self.forum,
-            play_game=self.play_game,
-            required_tag=self.required_tag,
-            selected_tag_ids=self.selected_tag_ids,
-            replay=self.replay,
-            auto_archive_duration=self.auto_archive_duration,
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
-    async def cancel(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
-        await interaction.response.edit_message(
-            content="Playthrough creation cancelled.",
-            view=None,
-        )
-        self.stop()
-
-
 class _DuplicatePlayThreadView(discord.ui.View):
     def __init__(
         self,
@@ -775,7 +693,7 @@ class _DuplicatePlayThreadView(discord.ui.View):
         replay: bool,
         auto_archive_duration: int | None,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__(timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
@@ -862,6 +780,17 @@ def _thread_reference(thread: discord.Thread) -> str:
     return f"**{escape_untrusted_text(getattr(thread, 'name', 'thread'))}**"
 
 
+def _lookup_failure_message(error: Exception | str) -> str:
+    return f"Lookup failure. Error: {escape_untrusted_text(str(error), max_length=1500)}"
+
+
+def _no_changes_message(message: str) -> str:
+    message = message.rstrip()
+    if message.endswith((".", "!", "?")):
+        return f"{message} No changes were made."
+    return f"{message}. No changes were made."
+
+
 def _message_preview(message: discord.Message, *, max_length: int = 180) -> str:
     content = re.sub(r"\s+", " ", getattr(message, "content", "") or "").strip()
     if content:
@@ -884,11 +813,30 @@ def _thread_last_post_description(thread: discord.Thread) -> str:
     return f"Last post: {thread_last_activity_at(thread).date().isoformat()}"
 
 
-def _thread_select_option(thread: discord.Thread) -> discord.SelectOption:
+def _sorted_threads_by_last_post(threads: list[discord.Thread]) -> list[discord.Thread]:
+    return sorted(threads, key=thread_last_activity_at, reverse=True)
+
+
+def _limited_thread_options(threads: list[discord.Thread]) -> list[discord.Thread]:
+    return _sorted_threads_by_last_post(threads)[:_PLAY_MODAL_OPTION_LIMIT]
+
+
+def _thread_limit_note(threads: list[discord.Thread]) -> str | None:
+    if len(threads) <= _PLAY_MODAL_OPTION_LIMIT:
+        return None
+    return f"Showing the {_PLAY_MODAL_OPTION_LIMIT} most recent matching posts."
+
+
+def _thread_select_option(
+    thread: discord.Thread,
+    *,
+    default: bool = False,
+) -> discord.SelectOption:
     return discord.SelectOption(
         label=(thread.name or f"Thread {thread.id}")[:100],
         description=_thread_last_post_description(thread),
         value=str(thread.id),
+        default=default,
     )
 
 
@@ -911,26 +859,31 @@ class _EndPlayThreadModal(discord.ui.Modal):
         requester_id: int,
         guild_id: int,
         threads: list[discord.Thread],
+        default_thread_id: int | None = None,
     ) -> None:
-        super().__init__(title="End Channel", timeout=180)
+        super().__init__(title="End Channel", timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
-        self.threads = {
-            thread.id: thread
-            for thread in threads[:_PLAY_MODAL_OPTION_LIMIT]
-        }
+        limited_threads = _limited_thread_options(threads)
+        self.threads = {thread.id: thread for thread in limited_threads}
 
         self.thread_select = discord.ui.Select(
             placeholder="Make a selection",
             min_values=1,
             max_values=1,
             options=[
-                _thread_select_option(thread)
-                for thread in threads[:_PLAY_MODAL_OPTION_LIMIT]
+                _thread_select_option(
+                    thread,
+                    default=thread.id == default_thread_id,
+                )
+                for thread in limited_threads
             ],
             required=True,
         )
+        note = _thread_limit_note(threads)
+        if note is not None:
+            self.add_item(discord.ui.TextDisplay(note))
         self.add_item(
             discord.ui.Label(
                 text="Channel Select",
@@ -991,7 +944,7 @@ class _PlayMessageActionConfirmModal(discord.ui.Modal):
             "delete": "Delete Message",
             "pin": "Pin Message",
         }[action]
-        super().__init__(title=title, timeout=180)
+        super().__init__(title=title, timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
@@ -1038,28 +991,39 @@ class _NewPlaythroughModal(discord.ui.Modal):
         cog: "Play",
         requester_id: int,
         guild_id: int,
-        game_options: list[discord.SelectOption],
         spoiler_options: list[discord.SelectOption],
+        play_games: Sequence[PlayGame] = (),
+        play_game: PlayGame | None = None,
     ) -> None:
-        super().__init__(title="New Playthrough", timeout=180)
+        super().__init__(title="New Playthrough", timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
-
-        self.game_select = discord.ui.Select(
-            placeholder="Make a selection",
-            min_values=1,
-            max_values=1,
-            options=game_options[:_PLAY_MODAL_OPTION_LIMIT],
-            required=True,
-        )
-        self.add_item(
-            discord.ui.Label(
-                text="Visual Novel",
-                component=self.game_select,
-                description="Create a new playthrough",
+        self.game_key = play_game.key if play_game is not None else None
+        self.game_select: discord.ui.Select | None = None
+        if play_game is None:
+            self.game_select = discord.ui.Select(
+                placeholder="Visual Novel",
+                min_values=1,
+                max_values=1,
+                options=[
+                    _game_select_option(game)
+                    for game in play_games[:_PLAY_MODAL_OPTION_LIMIT]
+                ],
+                required=True,
             )
-        )
+            self.add_item(
+                discord.ui.Label(
+                    text="Visual Novel",
+                    component=self.game_select,
+                )
+            )
+        else:
+            self.add_item(
+                discord.ui.TextDisplay(
+                    f"Visual Novel: **{escape_untrusted_text(play_game.display_name)}**"
+                )
+            )
 
         self.replay_select = discord.ui.Select(
             placeholder="First playthrough",
@@ -1089,7 +1053,7 @@ class _NewPlaythroughModal(discord.ui.Modal):
                 placeholder="No additional spoilers",
                 min_values=0,
                 max_values=min(
-                    MAX_FORUM_THREAD_TAGS,
+                    MAX_ADDITIONAL_SPOILER_TAGS,
                     len(spoiler_options),
                 ),
                 options=spoiler_options[:_PLAY_MODAL_OPTION_LIMIT],
@@ -1099,7 +1063,10 @@ class _NewPlaythroughModal(discord.ui.Modal):
                 discord.ui.Label(
                     text="Spoiler Tags",
                     component=self.spoiler_select,
-                    description="Please select up to 5 spoiler tags (4 for replays)",
+                    description=(
+                        "Please select up to 4 spoiler tags. To allow spoilers "
+                        "for your current game, use Replay."
+                    ),
                 )
             )
 
@@ -1117,21 +1084,21 @@ class _NewPlaythroughModal(discord.ui.Modal):
             )
             return
 
-        try:
-            game_key = self.game_select.values[0]
-        except IndexError:
-            await interaction.response.send_message(
-                "Choose a Visual Novel for this playthrough.",
-                ephemeral=True,
-            )
-            return
-
         selected_tag_values = (
             list(self.spoiler_select.values)
             if self.spoiler_select is not None
             else []
         )
         replay = self.replay_select.values[:1] == ["true"]
+        game_key = self.game_key
+        if self.game_select is not None:
+            game_key = self.game_select.values[0] if self.game_select.values else None
+        if game_key is None:
+            await interaction.response.send_message(
+                "Choose a Visual Novel for this playthrough.",
+                ephemeral=True,
+            )
+            return
 
         await self.cog.start_playthrough_from_modal(
             interaction,
@@ -1139,6 +1106,88 @@ class _NewPlaythroughModal(discord.ui.Modal):
             selected_tag_values=selected_tag_values,
             replay=replay,
         )
+
+
+class _PlayForumSelect(discord.ui.Select):
+    def __init__(self, groups: list[PlayForumGameGroup]) -> None:
+        super().__init__(
+            placeholder="Playthrough forum",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"#{group.forum.name}"[:100],
+                    value=str(group.forum.id),
+                    description=f"{len(group.games)} configured game(s)",
+                )
+                for group in groups[:_PLAY_MODAL_OPTION_LIMIT]
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, _PlayForumSelectView):
+            await interaction.response.defer()
+            return
+
+        try:
+            forum_id = int(self.values[0])
+        except (IndexError, ValueError):
+            await interaction.response.send_message(
+                "Choose a playthrough forum.",
+                ephemeral=True,
+            )
+            return
+
+        await view.choose_forum(interaction, forum_id)
+
+
+class _PlayForumSelectView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "Play",
+        requester_id: int,
+        guild_id: int,
+        groups: list[PlayForumGameGroup],
+    ) -> None:
+        super().__init__(timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.groups = {group.forum.id: group for group in groups}
+        self.add_item(_PlayForumSelect(groups))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this playthrough can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This playthrough setup is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def choose_forum(
+        self,
+        interaction: discord.Interaction,
+        forum_id: int,
+    ) -> None:
+        group = self.groups.get(forum_id)
+        if group is None:
+            await interaction.response.send_message(
+                "That playthrough forum is no longer available.",
+                ephemeral=True,
+            )
+            return
+
+        self.stop()
+        await self.cog._send_new_playthrough_modal(interaction, group)
 
 
 class _DeletePlayThreadModal(discord.ui.Modal):
@@ -1150,11 +1199,12 @@ class _DeletePlayThreadModal(discord.ui.Modal):
         guild_id: int,
         threads: list[discord.Thread],
     ) -> None:
-        super().__init__(title="Delete Channel", timeout=180)
+        super().__init__(title="Delete Channel", timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
-        self.threads = {thread.id: thread for thread in threads[:_PLAY_MODAL_OPTION_LIMIT]}
+        limited_threads = _limited_thread_options(threads)
+        self.threads = {thread.id: thread for thread in limited_threads}
 
         self.warning = discord.ui.TextDisplay(
             "THIS WILL DELETE YOUR CHANNEL PERMANENTLY."
@@ -1165,11 +1215,14 @@ class _DeletePlayThreadModal(discord.ui.Modal):
             max_values=1,
             options=[
                 _thread_select_option(thread)
-                for thread in threads[:_PLAY_MODAL_OPTION_LIMIT]
+                for thread in limited_threads
             ],
             required=True,
         )
         self.add_item(self.warning)
+        note = _thread_limit_note(threads)
+        if note is not None:
+            self.add_item(discord.ui.TextDisplay(note))
         self.add_item(
             discord.ui.Label(
                 text="Channel Select",
@@ -1225,11 +1278,12 @@ class _UnlockPlayThreadModal(discord.ui.Modal):
         guild_id: int,
         threads: list[discord.Thread],
     ) -> None:
-        super().__init__(title="Unlock Channel", timeout=180)
+        super().__init__(title="Unlock Channel", timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
-        self.threads = {thread.id: thread for thread in threads[:25]}
+        limited_threads = _limited_thread_options(threads)
+        self.threads = {thread.id: thread for thread in limited_threads}
 
         self.thread_select = discord.ui.Select(
             placeholder="Locked or archived playthrough post",
@@ -1237,10 +1291,13 @@ class _UnlockPlayThreadModal(discord.ui.Modal):
             max_values=1,
             options=[
                 _thread_select_option(thread)
-                for thread in threads[:25]
+                for thread in limited_threads
             ],
             required=True,
         )
+        note = _thread_limit_note(threads)
+        if note is not None:
+            self.add_item(discord.ui.TextDisplay(note))
         self.add_item(
             discord.ui.Label(
                 text="Which channel should be unlocked?",
@@ -1286,6 +1343,87 @@ class _UnlockPlayThreadModal(discord.ui.Modal):
         )
 
 
+class _UnlockPlayThreadView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "Play",
+        requester_id: int,
+        guild_id: int,
+        threads: list[discord.Thread],
+    ) -> None:
+        super().__init__(timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        limited_threads = _limited_thread_options(threads)
+        self.threads = {thread.id: thread for thread in limited_threads}
+        self.thread_select = discord.ui.Select(
+            placeholder="Locked or archived playthrough post",
+            min_values=1,
+            max_values=1,
+            options=[_thread_select_option(thread) for thread in limited_threads],
+        )
+        self.add_item(self.thread_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this confirmation can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This confirmation is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Unlock", style=discord.ButtonStyle.success, row=1)
+    async def unlock(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        try:
+            selected_thread_id = int(self.thread_select.values[0])
+        except (IndexError, ValueError):
+            await interaction.response.send_message(
+                "Choose a playthrough post to unlock.",
+                ephemeral=True,
+            )
+            return
+
+        thread = self.threads.get(selected_thread_id)
+        if thread is None:
+            await interaction.response.send_message(
+                "That playthrough post is no longer available.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.stop()
+        await self.cog.unlock_playthrough_thread_from_confirmation(
+            interaction,
+            thread=thread,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Unlock cancelled.",
+            view=None,
+        )
+        self.stop()
+
+
 class Play(commands.Cog):
     """
     Visual Novel playthrough forum posts.
@@ -1320,6 +1458,10 @@ class Play(commands.Cog):
     def context_menu_commands(self) -> tuple[app_commands.ContextMenu, ...]:
         return self._context_menu_commands
 
+    async def cog_load(self) -> None:
+        if not self._lock_archived_playthroughs.is_running():
+            self._lock_archived_playthroughs.start()
+
     def cog_unload(self):
         tree = getattr(self.bot, "tree", None)
         if tree is not None:
@@ -1331,24 +1473,6 @@ class Play(commands.Cog):
         self._lock_archived_playthroughs.cancel()
         self.play_store.close()
         self.module_store.close()
-
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        if not self._lock_archived_playthroughs.is_running():
-            self._lock_archived_playthroughs.start()
-
-    async def game_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        if interaction.guild_id is None:
-            return []
-
-        return [
-            app_commands.Choice(name=game.display_name, value=game.key)
-            for game in self.play_store.search_games(interaction.guild_id, current)
-        ]
 
     async def _get_forum_channel(
         self,
@@ -1370,6 +1494,44 @@ class Play(commands.Cog):
     def _configured_play_forums(self, guild_id: int) -> dict[int, set[int]]:
         return self.play_store.configured_play_forums(guild_id)
 
+    def _configured_play_game_names(self, guild_id: int) -> dict[int, set[str]]:
+        config = self.play_store.get_config(guild_id)
+        default_forum_id = config.forum_channel_id if config else None
+        games_by_forum: dict[int, set[str]] = {}
+
+        for game in self.play_store.list_games(guild_id):
+            forum_id = game.forum_channel_id or default_forum_id
+            if forum_id is None:
+                continue
+            games_by_forum.setdefault(forum_id, set()).add(
+                _normalized_play_game_name(game.display_name)
+            )
+
+        return games_by_forum
+
+    async def _configured_play_forum_game_groups(
+        self,
+        guild: discord.Guild,
+    ) -> list[PlayForumGameGroup]:
+        config = self.play_store.get_config(guild.id)
+        default_forum_id = config.forum_channel_id if config else None
+        games_by_forum: dict[int, list[PlayGame]] = {}
+
+        for game in self.play_store.list_games(guild.id):
+            forum_id = game.forum_channel_id or default_forum_id
+            if forum_id is None:
+                continue
+            games_by_forum.setdefault(forum_id, []).append(game)
+
+        groups: list[PlayForumGameGroup] = []
+        for forum_id, games in sorted(games_by_forum.items()):
+            forum = await self._get_forum_channel(guild, forum_id)
+            if forum is None:
+                continue
+            groups.append(PlayForumGameGroup(forum=forum, games=tuple(games)))
+
+        return groups
+
     def configured_play_tag_ids_for_forum(
         self,
         guild_id: int,
@@ -1384,7 +1546,7 @@ class Play(commands.Cog):
         self,
         guild: discord.Guild,
         forum: discord.ForumChannel,
-        configured_tag_ids: set[int],
+        configured_game_names: set[str],
         checkpoint: dict[str, object] | None,
         started_at: datetime,
         grace_days: int | None = None,
@@ -1405,7 +1567,7 @@ class Play(commands.Cog):
             scanned_count += 1
             if not should_lock_archived_play_thread(
                 thread,
-                configured_tag_ids=configured_tag_ids,
+                configured_game_names=configured_game_names,
                 now=started_at,
                 grace_days=effective_grace_days,
             ):
@@ -1463,6 +1625,12 @@ class Play(commands.Cog):
         )
         if not configured_tag_ids:
             return None
+        configured_game_names = self._configured_play_game_names(guild.id).get(
+            forum.id,
+            set(),
+        )
+        if not configured_game_names:
+            return None
 
         checkpoint = load_play_lock_sweep_checkpoint(
             self._cache_dir,
@@ -1472,7 +1640,7 @@ class Play(commands.Cog):
         return await self._sweep_archived_playthroughs_for_forum(
             guild,
             forum,
-            configured_tag_ids,
+            configured_game_names,
             checkpoint,
             started_at or _utc_now(),
             grace_days=grace_days,
@@ -1490,9 +1658,8 @@ class Play(commands.Cog):
         if bot_member is None:
             return
 
-        for forum_id, configured_tag_ids in self._configured_play_forums(
-            guild.id
-        ).items():
+        configured_game_names_by_forum = self._configured_play_game_names(guild.id)
+        for forum_id, configured_tag_ids in self._configured_play_forums(guild.id).items():
             forum = await self._get_forum_channel(guild, forum_id)
             if forum is None:
                 continue
@@ -1524,7 +1691,7 @@ class Play(commands.Cog):
                     await self._sweep_archived_playthroughs_for_forum(
                         guild,
                         forum,
-                        configured_tag_ids,
+                        configured_game_names_by_forum.get(forum_id, set()),
                         checkpoint,
                         started_at,
                     )
@@ -1733,75 +1900,61 @@ class Play(commands.Cog):
 
         return selected_tag_ids, None
 
-    async def _play_spoiler_tag_options(
+    def _play_spoiler_tag_options(
         self,
-        guild: discord.Guild,
-        games: list[PlayGame],
+        forum: discord.ForumChannel,
+        required_tag: discord.ForumTag | None = None,
     ) -> list[discord.SelectOption]:
-        config = self.play_store.get_config(guild.id)
         options: list[discord.SelectOption] = []
-        seen_tag_keys: set[tuple[int, int]] = set()
-        for game in games:
-            forum_id = game.forum_channel_id or (
-                config.forum_channel_id if config else None
-            )
-            if forum_id is None:
+        for tag in forum.available_tags:
+            if required_tag is not None and tag.id == required_tag.id:
                 continue
-
-            forum = await self._get_forum_channel(guild, forum_id)
-            if forum is None:
-                continue
-
-            for tag in forum.available_tags:
-                tag_key = (forum.id, tag.id)
-                if tag_key in seen_tag_keys:
-                    continue
-
-                options.append(
-                    discord.SelectOption(
-                        label=(tag.name or f"Tag {tag.id}")[:100],
-                        value=_spoiler_tag_value(forum.id, tag.id),
-                    )
+            options.append(
+                discord.SelectOption(
+                    label=(tag.name or f"Tag {tag.id}")[:100],
+                    value=_spoiler_tag_value(forum.id, tag.id),
                 )
-                seen_tag_keys.add(tag_key)
-                if len(options) >= _PLAY_MODAL_OPTION_LIMIT:
-                    return options
-
+            )
+            if len(options) >= _PLAY_MODAL_OPTION_LIMIT:
+                return options
         return options
 
-    async def _send_spoiler_tag_prompt(
+    async def _send_new_playthrough_modal(
         self,
         interaction: discord.Interaction,
-        *,
-        forum: discord.ForumChannel,
-        play_game: PlayGame,
-        required_tag: discord.ForumTag,
-        replay: bool,
-        auto_archive_duration: int | None,
+        group: PlayForumGameGroup,
+        play_game: PlayGame | None = None,
     ) -> None:
-        safe_game_name = escape_untrusted_text(play_game.display_name)
-        view = _PlaySpoilerTagView(
-            cog=self,
-            requester_id=interaction.user.id,
-            guild_id=interaction.guild.id,
-            forum=forum,
-            play_game=play_game,
-            required_tag=required_tag,
-            replay=replay,
-            auto_archive_duration=auto_archive_duration,
-        )
-        tag_note = (
-            f"\n\nThe **{escape_untrusted_text(required_tag.name)}** tag will be "
-            "applied automatically."
-            if replay and required_tag.name
-            else ""
-        )
-        view.message = await interaction.edit_original_response(
-            content=(
-                f"Would you like to include any additional spoilers in this channel "
-                f"for **{safe_game_name}**?{tag_note}"
-            ),
-            view=view,
+        if play_game is None and len(group.games) == 1:
+            play_game = group.games[0]
+
+        required_tag: discord.ForumTag | None = None
+        if play_game is not None:
+            required_tag = find_forum_tag(
+                group.forum,
+                tag_id=play_game.forum_tag_id,
+                name=play_game.display_name,
+            )
+            if required_tag is None:
+                await interaction.response.send_message(
+                    f"**{escape_untrusted_text(play_game.display_name)}** is missing its forum tag. "
+                    "Ask an admin to re-run `/amadeus play add-game` for this game.",
+                    ephemeral=True,
+                )
+                return
+
+        await interaction.response.send_modal(
+            _NewPlaythroughModal(
+                cog=self,
+                requester_id=interaction.user.id,
+                guild_id=interaction.guild.id,
+                play_games=list(group.games),
+                play_game=play_game,
+                spoiler_options=self._play_spoiler_tag_options(
+                    group.forum,
+                    required_tag,
+                ),
+            )
         )
 
     async def _send_duplicate_confirmation(
@@ -1887,11 +2040,26 @@ class Play(commands.Cog):
             await interaction.response.send_message(tag_error, ephemeral=True)
             return
 
-        selected_tag_ids = [
-            tag_id
-            for tag_id in selected_tag_ids
-            if tag_id != context.required_tag.id
-        ]
+        selected_current_game_tag = context.required_tag.id in selected_tag_ids
+        if selected_current_game_tag and not replay:
+            safe_game_name = escape_untrusted_text(context.play_game.display_name)
+            await interaction.response.send_message(
+                (
+                    f"You cannot allow spoilers for {safe_game_name} in your first "
+                    f"playthrough of {safe_game_name}. If you would like to include "
+                    "them, select the replay option."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if selected_current_game_tag:
+            selected_tag_ids = [
+                tag_id
+                for tag_id in selected_tag_ids
+                if tag_id != context.required_tag.id
+            ]
+
         _, tag_error = resolve_additional_spoiler_tags(
             context.forum,
             context.required_tag,
@@ -1969,70 +2137,86 @@ class Play(commands.Cog):
             )
             return
 
-        for existing_thread in existing_threads:
-            try:
-                await existing_thread.edit(
-                    archived=True,
-                    locked=True,
-                    reason=(
-                        f"Replace active playthrough post for "
-                        f"{interaction.user} ({interaction.user.id})"
-                    ),
-                )
-            except discord.Forbidden:
-                await interaction.edit_original_response(
-                    content=(
-                        f"I could not archive {_thread_reference(existing_thread)}. "
-                        "Check my Manage Threads permission."
-                    ),
-                    view=None,
-                )
-                return
-            except discord.HTTPException as e:
-                await interaction.edit_original_response(
-                    content=f"Discord rejected the archive request: `{e}`",
-                    view=None,
-                )
-                return
-
-            log(
-                f"PLAY // DUPLICATE ARCHIVED 『 THREAD {existing_thread.id} 』 "
-                f"GAME 『 {play_game.key} 』 USER 『 {interaction.user.id} 』 "
-                f"GUILD 『 {interaction.guild.id} 』",
-                level="debug",
-                logger_name="play",
-            )
-
-        if selected_tag_ids is None:
-            await self._send_spoiler_tag_prompt(
-                interaction,
-                forum=forum,
-                play_game=play_game,
-                required_tag=required_tag,
-                replay=replay,
-                auto_archive_duration=auto_archive_duration,
+        lock_key = (interaction.guild.id, interaction.user.id, play_game.key)
+        if lock_key in self._inflight_creates:
+            await interaction.edit_original_response(
+                content=(
+                    "A playthrough post for this game is already being created. "
+                    "Please wait a moment."
+                ),
+                view=None,
             )
             return
 
         extra_tags, error = resolve_additional_spoiler_tags(
             forum,
             required_tag,
-            selected_tag_ids,
+            selected_tag_ids or [],
             game_tag_applied=replay,
         )
         if error is not None:
             await interaction.edit_original_response(content=error, view=None)
             return
 
-        await self._create_playthrough_thread_unlocked(
-            interaction,
-            forum=forum,
-            play_game=play_game,
-            required_tag=required_tag,
-            extra_tags=extra_tags,
-            replay=replay,
-            auto_archive_duration=auto_archive_duration,
-        )
+        self._inflight_creates.add(lock_key)
+        try:
+            (
+                current_threads,
+                lookup_ok,
+            ) = await self._find_active_play_threads_or_respond(
+                interaction,
+                forum=forum,
+                play_game=play_game,
+                member=interaction.user,
+            )
+            if not lookup_ok:
+                return
+
+            for existing_thread in current_threads:
+                try:
+                    await existing_thread.edit(
+                        archived=True,
+                        locked=True,
+                        reason=(
+                            f"Replace active playthrough post for "
+                            f"{interaction.user} ({interaction.user.id})"
+                        ),
+                    )
+                except discord.Forbidden:
+                    await interaction.edit_original_response(
+                        content=(
+                            f"I could not archive {_thread_reference(existing_thread)}. "
+                            "Check my Manage Threads permission."
+                        ),
+                        view=None,
+                    )
+                    return
+                except discord.HTTPException as e:
+                    await interaction.edit_original_response(
+                        content=f"Discord rejected the archive request: `{e}`",
+                        view=None,
+                    )
+                    return
+
+                log(
+                    f"PLAY // DUPLICATE ARCHIVED 『 THREAD {existing_thread.id} 』 "
+                    f"GAME 『 {play_game.key} 』 USER 『 {interaction.user.id} 』 "
+                    f"GUILD 『 {interaction.guild.id} 』",
+                    level="debug",
+                    logger_name="play",
+                )
+
+            await self._create_playthrough_thread_unlocked(
+                interaction,
+                forum=forum,
+                play_game=play_game,
+                required_tag=required_tag,
+                extra_tags=extra_tags,
+                replay=replay,
+                auto_archive_duration=auto_archive_duration,
+            )
+        finally:
+            self._inflight_creates.discard(lock_key)
 
     async def create_playthrough_thread(
         self,
@@ -2252,6 +2436,7 @@ class Play(commands.Cog):
         return configured_playthrough_thread_context(
             channel,
             self._configured_play_forums(guild_id),
+            self._configured_play_game_names(guild_id),
         )
 
     def _owned_thread_context(
@@ -2276,6 +2461,8 @@ class Play(commands.Cog):
         self,
         interaction: discord.Interaction,
         threads: list[discord.Thread],
+        *,
+        default_thread_id: int | None = None,
     ) -> None:
         await interaction.response.send_modal(
             _EndPlayThreadModal(
@@ -2283,6 +2470,7 @@ class Play(commands.Cog):
                 requester_id=interaction.user.id,
                 guild_id=interaction.guild.id,
                 threads=threads,
+                default_thread_id=default_thread_id,
             )
         )
 
@@ -2305,10 +2493,12 @@ class Play(commands.Cog):
             interaction.guild.id,
             thread,
             interaction.user,
-        )
+            )
         if error is not None or context is None:
             await interaction.edit_original_response(
-                content=f"{error or 'That playthrough post is no longer valid'} No changes were made.",
+                content=_no_changes_message(
+                    error or "That playthrough post is no longer valid"
+                ),
                 view=None,
             )
             return
@@ -2403,7 +2593,9 @@ class Play(commands.Cog):
         )
         if error is not None or context is None:
             await interaction.edit_original_response(
-                content=f"{error or 'That playthrough post is no longer valid'} No changes were made.",
+                content=_no_changes_message(
+                    error or "That playthrough post is no longer valid"
+                ),
                 view=None,
             )
             return
@@ -2414,7 +2606,7 @@ class Play(commands.Cog):
         )
         if permission_error is not None:
             await interaction.edit_original_response(
-                content=f"{permission_error} No changes were made.",
+                content=_no_changes_message(permission_error),
                 view=None,
                 allowed_mentions=NO_MENTIONS,
             )
@@ -2455,39 +2647,33 @@ class Play(commands.Cog):
             view=None,
         )
 
-    def _is_unlockable_playthrough_thread(
-        self,
-        guild_id: int,
-        thread: object,
-        member: discord.Member,
-    ) -> bool:
-        context, error = self._owned_thread_context(guild_id, thread, member)
-        if error is not None or context is None:
-            return False
-        return _thread_needs_unlock(context.thread)
-
     async def _find_unlockable_playthrough_threads(
         self,
         guild: discord.Guild,
         member: discord.Member,
-        *,
-        selected_thread: discord.Thread | None = None,
     ) -> list[discord.Thread]:
         configured_forums = self._configured_play_forums(guild.id)
+        configured_game_names = self._configured_play_game_names(guild.id)
         threads: list[discord.Thread] = []
         seen_thread_ids: set[int] = set()
 
         def add_if_unlockable(thread: discord.Thread) -> None:
             if thread.id in seen_thread_ids:
                 return
-            if not self._is_unlockable_playthrough_thread(guild.id, thread, member):
+            context, error = configured_playthrough_thread_context(
+                thread,
+                configured_forums,
+                configured_game_names,
+            )
+            if error is not None or context is None:
+                return
+            if not thread_name_matches_player(context.thread, member):
+                return
+            if not _thread_needs_unlock(context.thread):
                 return
 
-            threads.append(thread)
+            threads.append(context.thread)
             seen_thread_ids.add(thread.id)
-
-        if selected_thread is not None:
-            add_if_unlockable(selected_thread)
 
         active_threads = getattr(guild, "active_threads", None)
         if callable(active_threads):
@@ -2502,23 +2688,26 @@ class Play(commands.Cog):
                     level="debug",
                     logger_name="play",
                 )
+                raise PlayThreadLookupError(str(e)) from e
 
         for forum_id in sorted(configured_forums):
             forum = await self._get_forum_channel(guild, forum_id)
             if forum is None:
-                continue
+                raise PlayThreadLookupError(
+                    f"Configured forum {forum_id} is missing or inaccessible."
+                )
 
             try:
                 async for thread in forum.archived_threads(limit=None):
                     add_if_unlockable(thread)
-            except discord.Forbidden:
+            except discord.Forbidden as e:
                 log(
                     f"PLAY // UNLOCK ARCHIVED THREAD SCAN FORBIDDEN "
                     f"『 GUILD {guild.id} 』 FORUM 『 {forum_id} 』",
                     level="debug",
                     logger_name="play",
                 )
-                continue
+                raise PlayThreadLookupError(str(e)) from e
             except discord.HTTPException as e:
                 log(
                     f"PLAY // UNLOCK ARCHIVED THREAD SCAN FAILED "
@@ -2526,9 +2715,9 @@ class Play(commands.Cog):
                     level="debug",
                     logger_name="play",
                 )
-                continue
+                raise PlayThreadLookupError(str(e)) from e
 
-        return threads
+        return _sorted_threads_by_last_post(threads)
 
     async def _send_unlock_thread_prompt(
         self,
@@ -2542,6 +2731,23 @@ class Play(commands.Cog):
             threads=threads,
         )
         await interaction.response.send_modal(modal)
+
+    async def _send_unlock_thread_fallback(
+        self,
+        interaction: discord.Interaction,
+        threads: list[discord.Thread],
+    ) -> None:
+        note = _thread_limit_note(threads)
+        content = "Choose a playthrough post to unlock."
+        if note is not None:
+            content = f"{content}\n{note}"
+        view = _UnlockPlayThreadView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            threads=threads,
+        )
+        await interaction.edit_original_response(content=content, view=view)
 
     async def unlock_playthrough_thread_from_confirmation(
         self,
@@ -2563,7 +2769,9 @@ class Play(commands.Cog):
         )
         if error is not None or context is None:
             await interaction.edit_original_response(
-                content=f"{error or 'That playthrough post is no longer valid'} No changes were made.",
+                content=_no_changes_message(
+                    error or "That playthrough post is no longer valid"
+                ),
                 view=None,
             )
             return
@@ -2583,6 +2791,7 @@ class Play(commands.Cog):
                 active_matches = await find_active_play_threads_by_name(
                     interaction.guild,
                     self._configured_play_forums(interaction.guild.id),
+                    self._configured_play_game_names(interaction.guild.id),
                     game_name=game_name,
                     member=interaction.user,
                     exclude_thread_id=context.thread.id,
@@ -2620,7 +2829,7 @@ class Play(commands.Cog):
         )
         if permission_error is not None:
             await interaction.edit_original_response(
-                content=f"{permission_error} No changes were made.",
+                content=_no_changes_message(permission_error),
                 view=None,
                 allowed_mentions=NO_MENTIONS,
             )
@@ -2737,7 +2946,7 @@ class Play(commands.Cog):
         try:
             guild_config = self.module_store.get_guild_config(guild.id)
         except RuntimeError:
-            return None
+            return _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE
 
         admin_role_id = getattr(guild_config, "admin_role_id", None)
         if admin_role_id is None:
@@ -2755,16 +2964,10 @@ class Play(commands.Cog):
                 try:
                     member = await fetch_member(author_id)
                 except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-                    return (
-                        "I could not verify whether that message author has the "
-                        "configured Amadeus admin role, so I will not delete it."
-                    )
+                    return _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE
 
         if member is None or not hasattr(member, "roles"):
-            return (
-                "I could not verify whether that message author has the configured "
-                "Amadeus admin role, so I will not delete it."
-            )
+            return _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE
 
         if any(role.id == admin_role_id for role in getattr(member, "roles", ())):
             return _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE
@@ -2860,44 +3063,6 @@ class Play(commands.Cog):
                 )
                 return
 
-        if action == "unlock":
-            if not _thread_needs_unlock(thread):
-                await interaction.response.send_message(
-                    "That playthrough post is already unlocked.",
-                    ephemeral=True,
-                )
-                return
-
-            permission_error = self._missing_bot_thread_permissions(
-                interaction.guild,
-                thread,
-            )
-            if permission_error is not None:
-                await interaction.response.send_message(
-                    permission_error,
-                    ephemeral=True,
-                    allowed_mentions=NO_MENTIONS,
-                )
-                return
-
-            threads = await self._find_unlockable_playthrough_threads(
-                interaction.guild,
-                interaction.user,
-                selected_thread=thread,
-            )
-            if not threads:
-                await interaction.response.send_message(
-                    (
-                        "I could not find a locked or archived playthrough post "
-                        "owned by your Discord username."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            await self._send_unlock_thread_prompt(interaction, threads)
-            return
-
         await self._send_message_action_prompt(
             interaction,
             message=message,
@@ -2925,7 +3090,7 @@ class Play(commands.Cog):
         )
         if error is not None or thread is None:
             await interaction.edit_original_response(
-                content=f"{error or 'That message is no longer valid'} No changes were made.",
+                content=_no_changes_message(error or "That message is no longer valid"),
                 view=None,
             )
             return
@@ -2946,7 +3111,7 @@ class Play(commands.Cog):
             )
             if permission_error is not None:
                 await interaction.edit_original_response(
-                    content=f"{permission_error} No changes were made.",
+                    content=_no_changes_message(permission_error),
                     view=None,
                     allowed_mentions=NO_MENTIONS,
                 )
@@ -2960,7 +3125,7 @@ class Play(commands.Cog):
             if protection_error is not None:
                 content = protection_error
                 if protection_error != _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE:
-                    content = f"{protection_error} No changes were made."
+                    content = _no_changes_message(protection_error)
                 await interaction.edit_original_response(
                     content=content,
                     view=None,
@@ -3051,17 +3216,6 @@ class Play(commands.Cog):
             action="pin",
         )
 
-    async def unlock_channel_context_menu(
-        self,
-        interaction: discord.Interaction,
-        message: discord.Message,
-    ) -> None:
-        await self._handle_play_message_context(
-            interaction,
-            message,
-            action="unlock",
-        )
-
     @play.command(
         name="new",
         description="Create a personal Visual Novel playthrough post.",
@@ -3082,34 +3236,35 @@ class Play(commands.Cog):
         ):
             return
 
-        games = self.play_store.list_games(interaction.guild.id)
-        if not games:
+        groups = await self._configured_play_forum_game_groups(interaction.guild)
+        if not groups:
             await interaction.response.send_message(
                 (
-                    "No games are configured for playthroughs on this server. "
-                    "Ask an admin to run `/amadeus play add-game` first."
+                    "No valid playthrough forums with configured games were found. "
+                    "Ask an admin to check `/amadeus play config`."
                 ),
                 ephemeral=True,
             )
             return
 
-        game_options = [
-            _game_select_option(game)
-            for game in games[:_PLAY_MODAL_OPTION_LIMIT]
-        ]
-        spoiler_options = await self._play_spoiler_tag_options(
-            interaction.guild,
-            games[:_PLAY_MODAL_OPTION_LIMIT],
-        )
+        if len(groups) == 1:
+            await self._send_new_playthrough_modal(interaction, groups[0])
+            return
 
-        await interaction.response.send_modal(
-            _NewPlaythroughModal(
-                cog=self,
-                requester_id=interaction.user.id,
-                guild_id=interaction.guild.id,
-                game_options=game_options,
-                spoiler_options=spoiler_options,
-            )
+        view = _PlayForumSelectView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            groups=groups,
+        )
+        content = "Choose a playthrough forum."
+        if len(groups) > _PLAY_MODAL_OPTION_LIMIT:
+            content += f"\nShowing the first {_PLAY_MODAL_OPTION_LIMIT} configured forums."
+        await interaction.response.send_message(
+            content,
+            view=view,
+            ephemeral=True,
+            allowed_mentions=NO_MENTIONS,
         )
 
     @play.command(
@@ -3136,6 +3291,7 @@ class Play(commands.Cog):
             threads = await find_active_owned_playthrough_threads(
                 interaction.guild,
                 self._configured_play_forums(interaction.guild.id),
+                self._configured_play_game_names(interaction.guild.id),
                 interaction.user,
             )
         except discord.HTTPException as e:
@@ -3216,6 +3372,7 @@ class Play(commands.Cog):
             await self._send_end_thread_modal(
                 interaction,
                 [current_context.thread],
+                default_thread_id=current_context.thread.id,
             )
             return
 
@@ -3223,6 +3380,7 @@ class Play(commands.Cog):
             threads = await find_active_owned_playthrough_threads(
                 interaction.guild,
                 self._configured_play_forums(interaction.guild.id),
+                self._configured_play_game_names(interaction.guild.id),
                 interaction.user,
             )
         except discord.HTTPException as e:
@@ -3248,7 +3406,11 @@ class Play(commands.Cog):
             )
             return
 
-        await self._send_end_thread_modal(interaction, threads)
+        await self._send_end_thread_modal(
+            interaction,
+            threads,
+            default_thread_id=getattr(interaction.channel, "id", None),
+        )
 
     @play.command(
         name="unlock",
@@ -3270,10 +3432,48 @@ class Play(commands.Cog):
         ):
             return
 
-        threads = await self._find_unlockable_playthrough_threads(
-            interaction.guild,
-            interaction.user,
-        )
+        try:
+            threads = await asyncio.wait_for(
+                self._find_unlockable_playthrough_threads(
+                    interaction.guild,
+                    interaction.user,
+                ),
+                timeout=_PLAY_INITIAL_RESPONSE_FALLBACK_SECONDS,
+            )
+        except TimeoutError:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                threads = await self._find_unlockable_playthrough_threads(
+                    interaction.guild,
+                    interaction.user,
+                )
+            except PlayThreadLookupError as e:
+                await interaction.edit_original_response(
+                    content=_lookup_failure_message(e),
+                    view=None,
+                )
+                return
+
+            if not threads:
+                await interaction.edit_original_response(
+                    content=(
+                        "I could not find a locked or archived playthrough post "
+                        "owned by your Discord username."
+                    ),
+                    view=None,
+                )
+                return
+
+            await self._send_unlock_thread_fallback(interaction, threads)
+            return
+        except PlayThreadLookupError as e:
+            await interaction.response.send_message(
+                _lookup_failure_message(e),
+                ephemeral=True,
+                allowed_mentions=NO_MENTIONS,
+            )
+            return
+
         if not threads:
             await interaction.response.send_message(
                 (

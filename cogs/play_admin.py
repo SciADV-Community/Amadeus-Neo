@@ -19,6 +19,7 @@ from cogs.play import (
     game_name_error,
     missing_play_lock_sweep_permissions,
     missing_play_forum_permissions,
+    missing_play_required_bot_permissions,
 )
 
 AUTO_ARCHIVE_CHOICES = [
@@ -90,11 +91,7 @@ def _remove_forum_confirmation_content(target: ConfiguredPlayForum) -> str:
     )
 
 
-def _delete_forum_channel_confirmation_content(
-    *,
-    forum_reference: str,
-    removed_games: list[PlayGame],
-) -> str:
+def _delete_forum_channel_confirmation_content() -> str:
     return (
         "ARE YOU SURE?\n"
         "Removal will attempt to delete the channel and all contained threads."
@@ -564,10 +561,7 @@ class PlayAdmin(commands.Cog):
         )
 
         await interaction.edit_original_response(
-            content=_delete_forum_channel_confirmation_content(
-                forum_reference=target.reference,
-                removed_games=removed_games,
-            ),
+            content=_delete_forum_channel_confirmation_content(),
             view=delete_view,
         )
 
@@ -1140,6 +1134,20 @@ class PlayAdmin(commands.Cog):
             value=str(len(configured_forum_ids)),
             inline=True,
         )
+        if config.admin_role_id is None:
+            admin_role_text = "Not configured"
+        else:
+            admin_role = interaction.guild.get_role(config.admin_role_id)
+            admin_role_text = (
+                admin_role.mention
+                if admin_role is not None
+                else f"Missing role `{config.admin_role_id}`"
+            )
+        embed.add_field(
+            name="Admin role",
+            value=admin_role_text,
+            inline=True,
+        )
 
         bot_member = interaction.guild.me
         if configured_forum_ids and bot_member is not None:
@@ -1150,7 +1158,10 @@ class PlayAdmin(commands.Cog):
                     permission_lines.append(f"`{forum_id}`: missing or not a forum")
                     continue
 
-                missing_permissions = missing_play_forum_permissions(forum, bot_member)
+                missing_permissions = missing_play_required_bot_permissions(
+                    forum,
+                    bot_member,
+                )
                 permission_lines.append(
                     f"{forum.mention}: OK"
                     if not missing_permissions
@@ -1160,7 +1171,7 @@ class PlayAdmin(commands.Cog):
             permission_text = "\n".join(permission_lines[:10])
             if len(permission_lines) > 10:
                 permission_text += f"\n...and {len(permission_lines) - 10} more."
-            embed.add_field(name="Forum permissions", value=permission_text, inline=False)
+            embed.add_field(name="Bot permissions", value=permission_text, inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

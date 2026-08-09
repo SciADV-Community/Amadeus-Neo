@@ -10,14 +10,13 @@ import cogs.play_admin as play_admin_module
 import cogs.play as play_module
 from cogs.play_admin import MAX_FORUM_TAG_NAME_LENGTH, PlayAdmin, tag_name_error
 from cogs.play import (
+    MAX_ADDITIONAL_SPOILER_TAGS,
     MAX_FORUM_THREAD_TAGS,
     PLAY_LOCK_SWEEP_INITIAL_LOOKBACK_DAYS,
     Play,
     SPOILER_CHANNEL_FLAG,
-    additional_spoiler_tags,
     calculate_spoiler_flags,
     configured_playthrough_thread_context,
-    find_active_play_thread,
     find_active_play_threads,
     find_active_owned_playthrough_threads,
     load_play_lock_sweep_checkpoint,
@@ -226,15 +225,6 @@ def test_forum_tag_helpers_match_by_id_or_case_insensitive_name():
     )
 
 
-def test_additional_spoiler_tags_excludes_required_game_tag():
-    gate = SimpleNamespace(id=10, name="Steins;Gate")
-    zero = SimpleNamespace(id=20, name="Steins;Gate 0")
-    chaos = SimpleNamespace(id=30, name="Chaos;Head")
-    forum = FakeForum([gate, zero, chaos], SimpleNamespace())
-
-    assert additional_spoiler_tags(forum, gate) == [zero, chaos]
-
-
 def test_resolve_additional_spoiler_tags_validates_ids_and_limit():
     gate = SimpleNamespace(id=10, name="Steins;Gate")
     tags = [gate] + [
@@ -269,10 +259,8 @@ def test_resolve_additional_spoiler_tags_validates_ids_and_limit():
         [10] + [20 + index for index in range(MAX_FORUM_THREAD_TAGS)],
         game_tag_applied=False,
     )
-    assert error is None
-    assert [tag.id for tag in resolved] == [
-        20 + index for index in range(MAX_FORUM_THREAD_TAGS)
-    ]
+    assert resolved == []
+    assert error == "Select at most **4** additional spoiler tags."
 
 
 def test_thread_name_player_match_is_case_insensitive():
@@ -331,13 +319,20 @@ def test_configured_playthrough_thread_context_filters_parent_tag_and_name():
     untagged_context, error = configured_playthrough_thread_context(
         thread,
         {20: {99}},
+        {20: {"steins;gate"}},
     )
     assert error is None
     assert untagged_context.thread is thread
     assert untagged_context.matched_tag_ids == frozenset()
     assert configured_playthrough_thread_context(
+        FakeThread(name="Unknown Game | @zips", parent_id=20, tags=[tag]),
+        {20: {10}},
+        {20: {"steins;gate"}},
+    ) == (None, "This thread is not named for a configured playthrough game.")
+    assert configured_playthrough_thread_context(
         FakeThread(name="General", parent_id=20, tags=[tag]),
         {20: {10}},
+        {20: {"steins;gate"}},
     ) == (None, "This thread is not named like a playthrough post.")
 
 
@@ -393,7 +388,12 @@ def test_find_active_owned_playthrough_threads_filters_to_unarchived_owned_posts
 
     member = SimpleNamespace(name="zips", display_name="Server Nickname")
     assert asyncio.run(
-        find_active_owned_playthrough_threads(Guild(), {20: {10}}, member)
+        find_active_owned_playthrough_threads(
+            Guild(),
+            {20: {10}},
+            {20: {"steins;gate", "steins;gate 0"}},
+            member,
+        )
     ) == [owned, untagged_owned]
 
 
@@ -436,10 +436,6 @@ def test_find_active_play_thread_matches_username_in_active_post_name():
                 tag_only_thread,
             ]
 
-    assert (
-        asyncio.run(find_active_play_thread(Guild(), forum, game, tag, member))
-        is exact_untagged_thread
-    )
     assert asyncio.run(find_active_play_threads(Guild(), forum, game, member)) == [
         exact_untagged_thread
     ]
@@ -580,7 +576,7 @@ def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts()
 
     assert should_lock_archived_play_thread(
         old_thread,
-        configured_tag_ids={10},
+        configured_game_names={"steins;gate"},
         now=now,
         grace_days=14,
     ) is True
@@ -592,7 +588,7 @@ def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts()
             locked=True,
             last_message_id=old_message_id,
         ),
-        configured_tag_ids={10},
+        configured_game_names={"steins;gate"},
         now=now,
         grace_days=14,
     ) is False
@@ -603,7 +599,7 @@ def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts()
             tags=[tag],
             last_message_id=recent_message_id,
         ),
-        configured_tag_ids={10},
+        configured_game_names={"steins;gate"},
         now=now,
         grace_days=14,
     ) is False
@@ -614,10 +610,21 @@ def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts()
             tags=[],
             last_message_id=old_message_id,
         ),
-        configured_tag_ids={10},
+        configured_game_names={"steins;gate"},
         now=now,
         grace_days=14,
     ) is True
+    assert should_lock_archived_play_thread(
+        FakeThread(
+            name="Unknown Game | @zips",
+            parent_id=20,
+            tags=[tag],
+            last_message_id=old_message_id,
+        ),
+        configured_game_names={"steins;gate"},
+        now=now,
+        grace_days=14,
+    ) is False
     assert should_lock_archived_play_thread(
         FakeThread(
             name="General spoilers",
@@ -625,7 +632,7 @@ def test_should_lock_archived_play_thread_filters_to_old_configured_play_posts()
             tags=[tag],
             last_message_id=old_message_id,
         ),
-        configured_tag_ids={10},
+        configured_game_names={"steins;gate"},
         now=now,
         grace_days=14,
     ) is False
@@ -678,7 +685,7 @@ def test_archived_playthrough_sweep_locks_old_threads_and_writes_checkpoint(
             cog._sweep_archived_playthroughs_for_forum(
                 SimpleNamespace(id=1),
                 Forum(),
-                {10},
+                {"steins;gate", "steins;gate 0"},
                 None,
                 now,
             )
@@ -825,6 +832,54 @@ def test_play_auto_archive_autocomplete_lists_only_configured_forums(temp_db_pat
     assert [(choice.name, choice.value) for choice in choices] == [
         ("#steins-gate (1 games)", "20")
     ]
+
+
+def test_play_config_reports_admin_role_and_required_bot_permissions(
+    temp_db_path,
+    monkeypatch,
+):
+    async def allow_access(interaction, store):
+        return SimpleNamespace(admin_role_id=50)
+
+    monkeypatch.setattr(play_admin_module, "require_amadeus_access", allow_access)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    permissions = SimpleNamespace(
+        view_channel=True,
+        send_messages=True,
+        send_messages_in_threads=True,
+        manage_threads=False,
+        manage_channels=True,
+        manage_messages=False,
+        read_message_history=False,
+    )
+    forum = FakeForum(
+        [tag],
+        permissions,
+        forum_id=20,
+        mention="#playthroughs",
+    )
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        get_role=lambda role_id: None,
+    )
+    interaction = FakeInteraction(guild)
+    admin_cog = PlayAdmin(SimpleNamespace(get_cog=lambda name: None))
+    admin_cog._get_forum_channel = AsyncMock(return_value=forum)
+    admin_cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        asyncio.run(PlayAdmin.play_config.callback(admin_cog, interaction))
+    finally:
+        admin_cog.cog_unload()
+
+    _, kwargs = interaction.response.sent_messages[0]
+    fields = {field.name: field.value for field in kwargs["embed"].fields}
+    assert fields["Admin role"] == "Missing role `50`"
+    assert fields["Bot permissions"] == (
+        "#playthroughs: missing Manage Threads, Manage Messages, Read Message History"
+    )
 
 
 def test_play_admin_interaction_check_requires_enabled_module():
@@ -1192,7 +1247,7 @@ def test_play_new_opens_modal_with_game_and_spoiler_selects(
         forum_id=20,
         name="playthroughs",
     )
-    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    guild = SimpleNamespace(id=1, owner_id=999, me=SimpleNamespace(id=999))
     user = FakeMember(id=123, name="zips", display_name="Server Nickname")
     interaction = FakeInteraction(guild, user=user)
     cog = Play(SimpleNamespace())
@@ -1207,31 +1262,164 @@ def test_play_new_opens_modal_with_game_and_spoiler_selects(
 
     modal = interaction.response.modals[0]
     assert modal.title == "New Playthrough"
-    assert [(option.label, option.value) for option in modal.game_select.options] == [
-        ("Steins;Gate", "steins;gate")
-    ]
+    assert modal.game_key == "steins;gate"
     assert modal.replay_select.options[0].label == "First playthrough"
     assert modal.spoiler_select is not None
     assert [
         (option.label, option.description, option.value)
         for option in modal.spoiler_select.options
     ] == [
-        ("Steins;Gate", None, "20:10"),
         ("General spoilers", None, "20:50")
     ]
-    assert modal.spoiler_select.max_values == 2
+    assert modal.spoiler_select.max_values == 1
     spoiler_label = next(
         item
         for item in modal.children
         if getattr(item, "text", None) == "Spoiler Tags"
     )
     assert spoiler_label.description == (
-        "Please select up to 5 spoiler tags (4 for replays)"
+        "Please select up to 4 spoiler tags. To allow spoilers for your "
+        "current game, use Replay."
     )
 
 
-def test_new_playthrough_modal_allows_five_spoiler_tags():
-    game_options = [discord.SelectOption(label="Steins;Gate", value="steins;gate")]
+def test_play_new_multiple_forums_prompts_for_forum_then_opens_scoped_modal(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    gate_tag = SimpleNamespace(id=10, name="Steins;Gate")
+    chaos_tag = SimpleNamespace(id=30, name="Chaos;Head")
+    chaos_spoiler = SimpleNamespace(id=31, name="Chaos spoilers")
+    forum_a = FakeForum(
+        [gate_tag],
+        SimpleNamespace(),
+        forum_id=20,
+        name="science-adventure",
+        mention="#science-adventure",
+    )
+    forum_b = FakeForum(
+        [chaos_tag, chaos_spoiler],
+        SimpleNamespace(),
+        forum_id=30,
+        name="chaos",
+        mention="#chaos",
+    )
+    forums = {20: forum_a, 30: forum_b}
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog.play_store.save_game(1, "Chaos;Head", 30, 30)
+    cog._get_forum_channel = AsyncMock(
+        side_effect=lambda guild, channel_id: forums.get(channel_id)
+    )
+
+    try:
+        asyncio.run(Play.play_new.callback(cog, interaction))
+        args, kwargs = interaction.response.sent_messages[0]
+        assert args[0] == "Choose a playthrough forum."
+        forum_select = next(
+            item
+            for item in kwargs["view"].children
+            if getattr(item, "placeholder", None) == "Playthrough forum"
+        )
+        assert [option.value for option in forum_select.options] == ["20", "30"]
+        forum_select._values = ["30"]
+
+        select_interaction = FakeInteraction(guild, user=user)
+        asyncio.run(forum_select.callback(select_interaction))
+    finally:
+        cog.cog_unload()
+
+    modal = select_interaction.response.modals[0]
+    assert modal.game_key == "chaos;head"
+    assert [
+        (option.label, option.value)
+        for option in modal.spoiler_select.options
+    ] == [("Chaos spoilers", "30:31")]
+
+
+def test_play_new_single_forum_multiple_games_opens_modal_with_game_select(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    gate_tag = SimpleNamespace(id=10, name="Steins;Gate")
+    chaos_tag = SimpleNamespace(id=20, name="Chaos;Head")
+    forum = FakeForum(
+        [gate_tag, chaos_tag],
+        SimpleNamespace(),
+        forum_id=20,
+        name="science-adventure",
+        mention="#science-adventure",
+    )
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog.play_store.save_game(1, "Chaos;Head", 20, 20)
+    cog._get_forum_channel = AsyncMock(return_value=forum)
+
+    try:
+        asyncio.run(Play.play_new.callback(cog, interaction))
+    finally:
+        cog.cog_unload()
+
+    assert interaction.response.sent_messages == []
+    modal = interaction.response.modals[0]
+    assert modal.title == "New Playthrough"
+    assert modal.game_key is None
+    assert modal.game_select is not None
+    assert [(option.label, option.value) for option in modal.game_select.options] == [
+        ("Steins;Gate", "steins;gate"),
+        ("Chaos;Head", "chaos;head"),
+    ]
+    assert [
+        (option.label, option.value)
+        for option in modal.spoiler_select.options
+    ] == [
+        ("Steins;Gate", "20:10"),
+        ("Chaos;Head", "20:20"),
+    ]
+
+
+def test_new_playthrough_modal_submits_selected_game_from_modal():
+    cog = SimpleNamespace(start_playthrough_from_modal=AsyncMock())
+    modal = play_module._NewPlaythroughModal(
+        cog=cog,
+        requester_id=123,
+        guild_id=1,
+        play_games=[
+            SimpleNamespace(key="steins;gate", display_name="Steins;Gate"),
+            SimpleNamespace(key="chaos;head", display_name="Chaos;Head"),
+        ],
+        spoiler_options=[],
+    )
+    modal.game_select._values = ["chaos;head"]
+    modal.replay_select._values = ["true"]
+    interaction = FakeInteraction(
+        SimpleNamespace(id=1),
+        user=FakeMember(id=123, name="zips"),
+    )
+
+    asyncio.run(modal.on_submit(interaction))
+
+    cog.start_playthrough_from_modal.assert_awaited_once_with(
+        interaction,
+        game_key="chaos;head",
+        selected_tag_values=[],
+        replay=True,
+    )
+
+
+def test_new_playthrough_modal_allows_four_spoiler_tags():
     spoiler_options = [
         discord.SelectOption(label=f"Tag {index}", value=f"20:{index}")
         for index in range(MAX_FORUM_THREAD_TAGS + 1)
@@ -1241,17 +1429,19 @@ def test_new_playthrough_modal_allows_five_spoiler_tags():
         cog=SimpleNamespace(),
         requester_id=123,
         guild_id=1,
-        game_options=game_options,
+        play_game=SimpleNamespace(key="steins;gate", display_name="Steins;Gate"),
         spoiler_options=spoiler_options,
     )
 
     assert modal.spoiler_select is not None
-    assert modal.spoiler_select.max_values == MAX_FORUM_THREAD_TAGS
+    assert modal.spoiler_select.max_values == MAX_ADDITIONAL_SPOILER_TAGS
 
 
-def test_play_new_modal_replay_rejects_five_extra_spoiler_tags(
+@pytest.mark.parametrize("replay_value", ["false", "true"])
+def test_play_new_modal_rejects_five_extra_spoiler_tags(
     temp_db_path,
     monkeypatch,
+    replay_value,
 ):
     monkeypatch.setattr(play_module.discord, "Member", FakeMember)
 
@@ -1289,8 +1479,7 @@ def test_play_new_modal_replay_rejects_five_extra_spoiler_tags(
     try:
         asyncio.run(Play.play_new.callback(cog, interaction))
         modal = interaction.response.modals[0]
-        modal.game_select._values = ["steins;gate"]
-        modal.replay_select._values = ["true"]
+        modal.replay_select._values = [replay_value]
         modal.spoiler_select._values = [
             f"20:{20 + index}" for index in range(MAX_FORUM_THREAD_TAGS)
         ]
@@ -1303,6 +1492,64 @@ def test_play_new_modal_replay_rejects_five_extra_spoiler_tags(
     guild.active_threads.assert_not_awaited()
     submit_interaction.response.send_message.assert_awaited_once_with(
         "Select at most **4** additional spoiler tags.",
+        ephemeral=True,
+    )
+
+
+def test_play_new_modal_rejects_current_game_spoiler_for_first_playthrough(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    gate_tag = SimpleNamespace(id=10, name="Steins;Gate")
+    chaos_tag = SimpleNamespace(id=20, name="Chaos;Head")
+    forum = FakeForum(
+        [gate_tag, chaos_tag],
+        SimpleNamespace(
+            view_channel=True,
+            send_messages=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_threads=True,
+        ),
+        forum_id=20,
+        name="playthroughs",
+    )
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    guild = SimpleNamespace(
+        id=1,
+        me=FakeMember(id=999),
+        active_threads=AsyncMock(return_value=[]),
+    )
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog.play_store.save_game(1, "Chaos;Head", 20, 20)
+    cog._get_forum_channel = AsyncMock(return_value=forum)
+
+    try:
+        asyncio.run(Play.play_new.callback(cog, interaction))
+        modal = interaction.response.modals[0]
+        modal.game_select._values = ["steins;gate"]
+        modal.replay_select._values = ["false"]
+        modal.spoiler_select._values = ["20:10"]
+
+        submit_interaction = FakeInteraction(guild, user=user)
+        asyncio.run(modal.on_submit(submit_interaction))
+    finally:
+        cog.cog_unload()
+
+    guild.active_threads.assert_not_awaited()
+    submit_interaction.response.send_message.assert_awaited_once_with(
+        (
+            "You cannot allow spoilers for Steins;Gate in your first playthrough "
+            "of Steins;Gate. If you would like to include them, select the replay "
+            "option."
+        ),
         ephemeral=True,
     )
 
@@ -1352,9 +1599,8 @@ def test_play_new_modal_submit_shows_duplicate_buttons_before_creation(
     try:
         asyncio.run(Play.play_new.callback(cog, interaction))
         modal = interaction.response.modals[0]
-        modal.game_select._values = ["steins;gate"]
         modal.replay_select._values = ["false"]
-        modal.spoiler_select._values = ["20:10", "20:50"]
+        modal.spoiler_select._values = ["20:50"]
 
         submit_interaction = FakeInteraction(guild, user=user)
         asyncio.run(modal.on_submit(submit_interaction))
@@ -1437,7 +1683,6 @@ def test_play_new_duplicate_prompt_lists_multiple_active_threads_by_name(
     try:
         asyncio.run(Play.play_new.callback(cog, interaction))
         modal = interaction.response.modals[0]
-        modal.game_select._values = ["steins;gate"]
         modal.replay_select._values = ["false"]
         modal.spoiler_select._values = ["20:50"]
 
@@ -1466,8 +1711,6 @@ def test_archive_duplicate_and_continue_archives_all_existing_threads(
 
     tag = SimpleNamespace(id=10, name="Steins;Gate")
     user = FakeMember(id=123, name="zips", display_name="Server Nickname")
-    guild = SimpleNamespace(id=1, me=FakeMember(id=999))
-    interaction = FakeInteraction(guild, user=user)
     first_thread = FakeThread(
         name="Steins;Gate | @zips",
         parent_id=20,
@@ -1482,6 +1725,12 @@ def test_archive_duplicate_and_continue_archives_all_existing_threads(
         thread_id=31,
         archived=False,
     )
+    guild = SimpleNamespace(
+        id=1,
+        me=FakeMember(id=999),
+        active_threads=AsyncMock(return_value=[first_thread, second_thread]),
+    )
+    interaction = FakeInteraction(guild, user=user)
     forum = FakeForum([tag], SimpleNamespace(), forum_id=20)
     cog = Play(SimpleNamespace())
     cog._create_playthrough_thread_unlocked = AsyncMock()
@@ -1650,10 +1899,10 @@ def test_play_end_current_thread_fast_path_skips_active_lookup(
     modal = interaction.response.modals[0]
     assert modal.title == "End Channel"
     assert [
-        (option.label, option.description, option.value)
+        (option.label, option.description, option.value, option.default)
         for option in modal.thread_select.options
     ] == [
-        ("Steins;Gate | @zips", "Last post: 2026-06-01", "30")
+        ("Steins;Gate | @zips", "Last post: 2026-06-01", "30", True)
     ]
 
 
@@ -1673,12 +1922,20 @@ def test_play_end_active_thread_fallback_lists_owned_threads(
         archived=False,
         archive_timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
     )
+    current_channel_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        thread_id=31,
+        archived=False,
+        archive_timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
     guild = SimpleNamespace(
         id=1,
         me=SimpleNamespace(id=999),
-        active_threads=AsyncMock(return_value=[owned]),
+        active_threads=AsyncMock(return_value=[owned, current_channel_thread]),
     )
-    interaction = FakeInteraction(guild, user=user, channel=SimpleNamespace())
+    interaction = FakeInteraction(guild, user=user, channel=SimpleNamespace(id=31))
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
@@ -1692,10 +1949,11 @@ def test_play_end_active_thread_fallback_lists_owned_threads(
     modal = interaction.response.modals[0]
     assert modal.title == "End Channel"
     assert [
-        (option.label, option.description, option.value)
+        (option.label, option.description, option.value, option.default)
         for option in modal.thread_select.options
     ] == [
-        ("Steins;Gate | @zips", "Last post: 2026-07-02", "30")
+        ("Steins;Gate | @zips", "Last post: 2026-07-02", "30", False),
+        ("Steins;Gate | @zips", "Last post: 2026-07-01", "31", True),
     ]
 
 
@@ -1714,7 +1972,7 @@ def test_play_end_modal_revalidates_and_archives_selection(
         thread_id=30,
         archived=False,
     )
-    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    guild = SimpleNamespace(id=1, owner_id=999, me=SimpleNamespace(id=999))
     cog = Play(SimpleNamespace())
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
     modal = play_module._EndPlayThreadModal(
@@ -1924,6 +2182,7 @@ def test_play_unlock_modal_lists_owned_locked_and_archived_threads(
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog.play_store.save_game(1, "Steins;Gate 0", 20, 10)
     cog._get_forum_channel = AsyncMock(return_value=Forum())
 
     try:
@@ -1941,6 +2200,88 @@ def test_play_unlock_modal_lists_owned_locked_and_archived_threads(
         ("Steins;Gate | @zips", "Last post: 2026-08-03", "30"),
         ("Steins;Gate 0 | @zips", "Last post: 2026-07-02", "32"),
     ]
+
+
+def test_play_unlock_falls_back_to_ephemeral_ui_when_modal_lookup_times_out(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    async def timeout(coro, *, timeout):
+        coro.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(play_module.asyncio, "wait_for", timeout)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    archived_locked = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        thread_id=32,
+        archived=True,
+        locked=True,
+        archive_timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    class Forum:
+        def archived_threads(self, *, limit=None):
+            async def iterator():
+                yield archived_locked
+
+            return iterator()
+
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[]),
+    )
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog._get_forum_channel = AsyncMock(return_value=Forum())
+
+    try:
+        asyncio.run(Play.play_unlock.callback(cog, interaction))
+    finally:
+        cog.cog_unload()
+
+    interaction.response.defer.assert_awaited_once_with(
+        ephemeral=True,
+        thinking=True,
+    )
+    assert interaction.edits[0]["content"] == "Choose a playthrough post to unlock."
+    assert isinstance(interaction.edits[0]["view"], play_module._UnlockPlayThreadView)
+
+
+def test_play_unlock_reports_lookup_failure(temp_db_path, monkeypatch):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[]),
+    )
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog._get_forum_channel = AsyncMock(return_value=None)
+
+    try:
+        asyncio.run(Play.play_unlock.callback(cog, interaction))
+    finally:
+        cog.cog_unload()
+
+    args, kwargs = interaction.response.sent_messages[0]
+    assert args[0] == (
+        "Lookup failure. Error: Configured forum 20 is missing or inaccessible."
+    )
+    assert kwargs["ephemeral"] is True
 
 
 def test_context_menu_rejects_wrong_channel(temp_db_path, monkeypatch):
@@ -2127,7 +2468,7 @@ def test_delete_confirmation_revalidates_admin_role_author(
     ]
 
 
-def test_delete_message_confirmation_revalidates_and_deletes(
+def test_delete_message_rejects_when_admin_role_cannot_be_verified(
     temp_db_path,
     monkeypatch,
 ):
@@ -2146,6 +2487,42 @@ def test_delete_message_confirmation_revalidates_and_deletes(
     message = FakeMessage(channel=thread, content="Delete me")
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        asyncio.run(cog.delete_message_context_menu(interaction, message))
+    finally:
+        cog.cog_unload()
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "You can not delete bot or moderator messages.",
+        ephemeral=True,
+        allowed_mentions=play_module.NO_MENTIONS,
+    )
+    assert interaction.response.modals == []
+    message.delete.assert_not_awaited()
+
+
+def test_delete_message_confirmation_revalidates_and_deletes(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        archived=False,
+    )
+    guild = SimpleNamespace(id=1, owner_id=999, me=SimpleNamespace(id=999))
+    interaction = FakeInteraction(guild, user=user)
+    message = FakeMessage(channel=thread, content="Delete me")
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.module_store.ensure_guild_config(guild)
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
 
     try:
@@ -2218,7 +2595,7 @@ def test_pin_message_confirmation_revalidates_and_pins(
     ]
 
 
-def test_unlock_channel_rejects_already_unlocked(temp_db_path, monkeypatch):
+def test_play_unlock_ignores_already_unlocked_threads(temp_db_path, monkeypatch):
     monkeypatch.setattr(play_module.discord, "Member", FakeMember)
 
     tag = SimpleNamespace(id=10, name="Steins;Gate")
@@ -2230,20 +2607,35 @@ def test_unlock_channel_rejects_already_unlocked(temp_db_path, monkeypatch):
         archived=False,
         locked=False,
     )
-    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    class Forum:
+        def archived_threads(self, *, limit=None):
+            async def iterator():
+                if False:
+                    yield None
+
+            return iterator()
+
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[thread]),
+    )
     interaction = FakeInteraction(guild, user=user)
-    message = FakeMessage(channel=thread)
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog._get_forum_channel = AsyncMock(return_value=Forum())
 
     try:
-        asyncio.run(cog.unlock_channel_context_menu(interaction, message))
+        asyncio.run(Play.play_unlock.callback(cog, interaction))
     finally:
         cog.cog_unload()
 
     interaction.response.send_message.assert_awaited_once_with(
-        "That playthrough post is already unlocked.",
+        (
+            "I could not find a locked or archived playthrough post "
+            "owned by your Discord username."
+        ),
         ephemeral=True,
     )
 
@@ -2287,6 +2679,7 @@ def test_unlock_channel_lists_owned_archived_threads_and_reopens_selection(
     class Forum:
         def archived_threads(self, *, limit=None):
             async def iterator():
+                yield selected_thread
                 yield other_thread
                 yield other_user_thread
 
@@ -2298,14 +2691,14 @@ def test_unlock_channel_lists_owned_archived_threads_and_reopens_selection(
         active_threads=AsyncMock(return_value=[]),
     )
     interaction = FakeInteraction(guild, user=user)
-    message = FakeMessage(channel=selected_thread, content="Open this")
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog.play_store.save_game(1, "Steins;Gate 0", 20, 10)
     cog._get_forum_channel = AsyncMock(return_value=Forum())
 
     try:
-        asyncio.run(cog.unlock_channel_context_menu(interaction, message))
+        asyncio.run(Play.play_unlock.callback(cog, interaction))
         modal = interaction.response.modals[0]
         assert modal.title == "Unlock Channel"
         select = modal.thread_select
@@ -2372,17 +2765,16 @@ def test_unlock_channel_finishes_active_locked_thread(temp_db_path, monkeypatch)
     guild = SimpleNamespace(
         id=1,
         me=SimpleNamespace(id=999),
-        active_threads=AsyncMock(return_value=[]),
+        active_threads=AsyncMock(return_value=[thread]),
     )
     interaction = FakeInteraction(guild, user=user)
-    message = FakeMessage(channel=thread, content="Open this")
     cog = Play(SimpleNamespace())
     cog.module_store.enable_module(1, "play")
     cog.play_store.save_game(1, "Steins;Gate", 20, 10)
     cog._get_forum_channel = AsyncMock(return_value=Forum())
 
     try:
-        asyncio.run(cog.unlock_channel_context_menu(interaction, message))
+        asyncio.run(Play.play_unlock.callback(cog, interaction))
         modal = interaction.response.modals[0]
         assert modal.title == "Unlock Channel"
         assert [option.value for option in modal.thread_select.options] == ["30"]

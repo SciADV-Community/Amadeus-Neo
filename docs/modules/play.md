@@ -1,6 +1,6 @@
 # Module: play
 
-Creates Visual Novel playthrough posts in configured Discord forum channels. Members run `/play new`, choose a configured game and optional spoiler tags in a modal, create a forum post in that game's forum, apply selected spoiler tags, ping the member in the starter post, and then mark the thread as a Spoiler Channel. Replay posts also apply the matching game tag automatically.
+Creates Visual Novel playthrough posts in configured Discord forum channels. Members run `/play new`, choose a configured forum and game when needed, fill the New Playthrough modal, create a forum post in that game's forum, apply selected spoiler tags, ping the member in the starter post, and then mark the thread as a Spoiler Channel. Replay posts also apply the matching game tag automatically.
 
 ## Enable / Disable
 
@@ -14,7 +14,7 @@ Creates Visual Novel playthrough posts in configured Discord forum channels. Mem
 1. `/amadeus play set-forum <forum>` - optionally set the default forum used when adding games.
 2. `/amadeus play add-game <name> [forum] [tag_name] [order]` - add a game to `/play new` and bind it to a forum channel.
 3. `/amadeus play remove-forum` - remove a configured playthrough forum after reviewing the affected games.
-4. `/amadeus play config` - verify the forums, game count, archive duration, and bot permissions.
+4. `/amadeus play config` - verify the forums, game count, admin role, archive duration, and bot permissions.
 
 `add-game` links an existing forum tag by name. If the tag does not exist, the bot creates it in the selected forum channel. If `forum` is omitted, the default forum from `/amadeus play set-forum` is used. If `tag_name` is omitted, the bot uses the game name as the tag name. If `order` is omitted, the game is added to the end of the `/play new` Visual Novel dropdown. Discord forum tag names are limited to 20 characters, so longer game names need an explicit shorter `tag_name`.
 
@@ -58,13 +58,13 @@ Members must also have **View Channels** and **Send Messages in Threads** in the
 | `/play end` | Archive and lock one of your active playthrough posts |
 | `/play unlock` | Open a modal to reopen one of your locked or archived playthrough posts |
 
-The `/play new` modal lists configured games, a replay selector, and configured spoiler tags from play forums. First playthroughs can apply up to five selected spoiler tags. Replays apply the selected game's tag automatically and can apply up to four additional spoiler tags. Discord select menus support at most 25 options.
+`/play new` uses the configured forum automatically when there is only one forum with games. If that forum has multiple games, the Visual Novel selector appears inside the modal. If multiple forums are available, the bot first asks for the forum, then opens the modal for that forum. The modal includes the replay selector and spoiler tags from the selected forum. When the game is known before the modal opens, the selected game's tag is hidden from the spoiler selector; when the game is selected inside the modal, selecting that same game tag without Replay fails with an ephemeral message. Members can select up to four spoiler tags. Replays apply the selected game's tag automatically as the fifth tag. Discord select menus support at most 25 options.
 
 `/play delete` scans active threads for configured playthrough posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting permanently deletes the selected post.
 
 `/play end` first checks the current channel. If it is one of your unarchived configured playthrough posts, the bot opens a modal with that post selected. Otherwise, the bot scans active threads for configured playthrough posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting archives and locks the selected post.
 
-`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post. If an active post for the same game already exists, the bot asks you to archive that active post before unlocking another.
+`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens a modal select when the lookup completes inside Discord's initial response window. If the lookup needs longer, the bot falls back to an ephemeral select UI. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post. If an active post for the same game already exists, the bot asks you to archive that active post before unlocking another.
 
 ## Message Context Menus
 
@@ -75,7 +75,7 @@ Discord message context commands cannot be registered for only some channels, so
 | `Delete Message` | Open a modal to confirm and delete a message from one of your unlocked playthrough posts |
 | `Pin Message` | Open a modal to confirm and pin a message in one of your unlocked playthrough posts |
 
-The selected message must be inside a configured playthrough forum post, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message` and `Pin Message` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels.
+The selected message must be inside a configured playthrough forum post named for a configured game, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message` and `Pin Message` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels.
 
 ## Admin Commands
 
@@ -95,16 +95,16 @@ The selected message must be inside a configured playthrough forum post, and the
 
 ## How It Works
 
-1. Member runs `/play new` and opens the New Playthrough modal.
-2. The member chooses a configured game, replay state, and spoiler tags. First playthroughs can select up to five tags; replays reserve one tag slot for the selected game's tag and can select up to four additional tags.
+1. Member runs `/play new`, chooses a configured forum when needed, and opens the New Playthrough modal.
+2. The member chooses replay state and up to four spoiler tags. Replays reserve one tag slot for the selected game's tag.
 3. The bot resolves the game's configured forum and tag.
-4. The bot checks only active guild threads in that forum. If active post names match the selected game and the member's Discord username, the bot shows an ephemeral confirmation with **No** and **Yes** buttons asking whether to archive the matching post or posts.
+4. The bot checks only active guild threads in that forum. If active post names match the selected configured game and the member's Discord username, the bot shows an ephemeral confirmation with **No** and **Yes** buttons asking whether to archive the matching post or posts.
 5. If no duplicate exists, or the member clicks **Yes**, the bot creates a forum post named `<game> | @username`, using the member's Discord username rather than their server nickname.
 6. The starter post says `<@user> | Spoilers for <game>` plus any selected spoiler tags, which pings the member before spoiler gating is applied.
 7. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
 8. The bot posts the playthrough guidance message inside the thread.
 
-The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username from the post name, not applied spoiler tags. If multiple active posts for the same game are found, the bot lists them and the **Yes** button archives all of them before creating the new post. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play new` usage.
+The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username from the post name, not applied spoiler tags. If multiple active posts for the same game are found, the bot lists them and the **Yes** button rechecks current active matches before archiving them and creating the new post. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play new` usage.
 
 ## Archived Post Locking
 
@@ -114,7 +114,7 @@ The sweep:
 
 1. Reads configured playthrough forums only.
 2. Lists archived forum posts from newest to oldest.
-3. Considers only posts named like `<game> | @username` in a configured playthrough forum.
+3. Considers only posts named like `<configured game> | @username` in a configured playthrough forum.
 4. Skips posts whose last message is newer than `AMADEUS_PLAY_ARCHIVED_LOCK_GRACE_DAYS`.
 5. Locks eligible archived posts with `archived=True` and `locked=True`.
 6. Writes a per-forum checkpoint under `AMADEUS_CACHE_DIR/<guild_id>/play_lock_sweeps/<forum_id>.json`.

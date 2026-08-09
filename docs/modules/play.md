@@ -64,7 +64,7 @@ The `/play new` modal lists configured games, a replay selector, and configured 
 
 `/play end` first checks the current channel. If it is one of your unarchived configured playthrough posts, the bot opens a modal with that post selected. Otherwise, the bot scans active threads for configured playthrough posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting archives and locks the selected post.
 
-`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post.
+`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post. If an active post for the same game already exists, the bot asks you to archive that active post before unlocking another.
 
 ## Message Context Menus
 
@@ -98,13 +98,13 @@ The selected message must be inside a configured playthrough forum post, and the
 1. Member runs `/play new` and opens the New Playthrough modal.
 2. The member chooses a configured game, replay state, and spoiler tags. First playthroughs can select up to five tags; replays reserve one tag slot for the selected game's tag and can select up to four additional tags.
 3. The bot resolves the game's configured forum and tag.
-4. The bot checks only active guild threads in that forum. If an active post name matches the selected game and the member's Discord username, the bot shows an ephemeral confirmation with **No** and **Yes** buttons asking whether to archive it.
+4. The bot checks only active guild threads in that forum. If active post names match the selected game and the member's Discord username, the bot shows an ephemeral confirmation with **No** and **Yes** buttons asking whether to archive the matching post or posts.
 5. If no duplicate exists, or the member clicks **Yes**, the bot creates a forum post named `<game> | @username`, using the member's Discord username rather than their server nickname.
 6. The starter post says `<@user> | Spoilers for <game>` plus any selected spoiler tags, which pings the member before spoiler gating is applied.
 7. The bot patches the created thread with Discord's `IS_SPOILER_CHANNEL` flag.
 8. The bot posts the playthrough guidance message inside the thread.
 
-The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username parsed from the post name. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play new` usage.
+The duplicate check uses active threads only. It matches the selected game, forum, and current Discord username from the post name, not applied spoiler tags. If multiple active posts for the same game are found, the bot lists them and the **Yes** button archives all of them before creating the new post. The module does not store player sessions in SQLite, and archived threads are not queried during normal `/play new` usage.
 
 ## Archived Post Locking
 

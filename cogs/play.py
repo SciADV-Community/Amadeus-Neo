@@ -240,6 +240,14 @@ def play_thread_owner_username(name: str) -> str | None:
     return owner or None
 
 
+def play_thread_game_name(name: str) -> str | None:
+    if _PLAY_THREAD_OWNER_SEPARATOR not in name:
+        return None
+
+    game_name = name.rsplit(_PLAY_THREAD_OWNER_SEPARATOR, 1)[0].strip()
+    return game_name or None
+
+
 def should_lock_archived_play_thread(
     thread: discord.Thread,
     *,
@@ -519,6 +527,44 @@ def thread_name_matches_playthrough(
     return thread.name.casefold() == expected_name
 
 
+def thread_name_matches_game_and_player(
+    thread: discord.Thread,
+    *,
+    game_name: str,
+    member: discord.Member,
+) -> bool:
+    actual_game_name = play_thread_game_name(thread.name)
+    if actual_game_name is None:
+        return False
+    if not thread_name_matches_player(thread, member):
+        return False
+
+    return (
+        _clean_thread_name_part(actual_game_name).casefold()
+        == _clean_thread_name_part(game_name).casefold()
+    )
+
+
+async def find_active_play_threads(
+    guild: discord.Guild,
+    forum: discord.ForumChannel,
+    game: PlayGame,
+    member: discord.Member,
+) -> list[discord.Thread]:
+    active_threads = await guild.active_threads()
+    matches: list[discord.Thread] = []
+
+    for thread in active_threads:
+        if thread.parent_id != forum.id:
+            continue
+        if getattr(thread, "archived", False):
+            continue
+        if thread_name_matches_playthrough(thread, game, member):
+            matches.append(thread)
+
+    return matches
+
+
 async def find_active_play_thread(
     guild: discord.Guild,
     forum: discord.ForumChannel,
@@ -526,17 +572,41 @@ async def find_active_play_thread(
     tag: discord.ForumTag,
     member: discord.Member,
 ) -> discord.Thread | None:
+    matches = await find_active_play_threads(guild, forum, game, member)
+    return matches[0] if matches else None
+
+
+async def find_active_play_threads_by_name(
+    guild: discord.Guild,
+    configured_forums: Mapping[int, set[int]],
+    *,
+    game_name: str,
+    member: discord.Member,
+    exclude_thread_id: int | None = None,
+) -> list[discord.Thread]:
     active_threads = await guild.active_threads()
+    matches: list[discord.Thread] = []
 
     for thread in active_threads:
-        if thread.parent_id != forum.id:
+        if thread.id == exclude_thread_id:
             continue
-        if thread_name_matches_playthrough(thread, game, member):
-            return thread
-        if thread_has_tag(thread, tag.id) and thread_name_matches_player(thread, member):
-            return thread
+        if getattr(thread, "archived", False):
+            continue
 
-    return None
+        context, _ = configured_playthrough_thread_context(
+            thread,
+            configured_forums,
+        )
+        if context is None:
+            continue
+        if thread_name_matches_game_and_player(
+            context.thread,
+            game_name=game_name,
+            member=member,
+        ):
+            matches.append(context.thread)
+
+    return matches
 
 
 def missing_play_forum_permissions(
@@ -697,7 +767,7 @@ class _DuplicatePlayThreadView(discord.ui.View):
         cog: "Play",
         requester_id: int,
         guild_id: int,
-        existing_thread: discord.Thread,
+        existing_threads: list[discord.Thread],
         forum: discord.ForumChannel,
         play_game: PlayGame,
         required_tag: discord.ForumTag,
@@ -709,7 +779,7 @@ class _DuplicatePlayThreadView(discord.ui.View):
         self.cog = cog
         self.requester_id = requester_id
         self.guild_id = guild_id
-        self.existing_thread = existing_thread
+        self.existing_threads = existing_threads
         self.forum = forum
         self.play_game = play_game
         self.required_tag = required_tag
@@ -763,14 +833,19 @@ class _DuplicatePlayThreadView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
+        thread_count = len(self.existing_threads)
         await interaction.response.edit_message(
-            content="Archiving existing playthrough post...",
+            content=(
+                "Archiving existing playthrough posts..."
+                if thread_count != 1
+                else "Archiving existing playthrough post..."
+            ),
             view=None,
         )
         self.stop()
         await self.cog.archive_duplicate_and_continue(
             interaction,
-            existing_thread=self.existing_thread,
+            existing_threads=self.existing_threads,
             forum=self.forum,
             play_game=self.play_game,
             required_tag=self.required_tag,
@@ -1510,22 +1585,20 @@ class Play(commands.Cog):
                 logger_name="play",
             )
 
-    async def _find_active_play_thread_or_respond(
+    async def _find_active_play_threads_or_respond(
         self,
         interaction: discord.Interaction,
         *,
         forum: discord.ForumChannel,
         play_game: PlayGame,
-        required_tag: discord.ForumTag,
         member: discord.Member,
-    ) -> tuple[discord.Thread | None, bool]:
+    ) -> tuple[list[discord.Thread], bool]:
         try:
             return (
-                await find_active_play_thread(
+                await find_active_play_threads(
                     interaction.guild,
                     forum,
                     play_game,
-                    required_tag,
                     member,
                 ),
                 True,
@@ -1544,7 +1617,7 @@ class Play(commands.Cog):
                 ),
                 view=None,
             )
-            return None, False
+            return [], False
 
     async def _resolve_play_create_context(
         self,
@@ -1735,7 +1808,7 @@ class Play(commands.Cog):
         self,
         interaction: discord.Interaction,
         *,
-        existing_thread: discord.Thread,
+        existing_threads: list[discord.Thread],
         forum: discord.ForumChannel,
         play_game: PlayGame,
         required_tag: discord.ForumTag,
@@ -1748,7 +1821,7 @@ class Play(commands.Cog):
             cog=self,
             requester_id=interaction.user.id,
             guild_id=interaction.guild.id,
-            existing_thread=existing_thread,
+            existing_threads=existing_threads,
             forum=forum,
             play_game=play_game,
             required_tag=required_tag,
@@ -1756,12 +1829,25 @@ class Play(commands.Cog):
             replay=replay,
             auto_archive_duration=auto_archive_duration,
         )
-        view.message = await interaction.edit_original_response(
-            content=(
+        if len(existing_threads) == 1:
+            content = (
                 f"An active {safe_game_name} playthrough by you was found: "
-                f"{_thread_reference(existing_thread)}\n"
+                f"{_thread_reference(existing_threads[0])}\n"
                 "Would you like to archive it?"
-            ),
+            )
+        else:
+            thread_list = "\n".join(
+                f"- {_thread_reference(thread)}"
+                for thread in existing_threads
+            )
+            content = (
+                f"Multiple active {safe_game_name} channels by you were found:\n"
+                f"{thread_list}\n\n"
+                "Would you like to archive them?"
+            )
+
+        view.message = await interaction.edit_original_response(
+            content=content,
             view=view,
             allowed_mentions=NO_MENTIONS,
         )
@@ -1819,11 +1905,10 @@ class Play(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
-            existing_thread = await find_active_play_thread(
+            existing_threads = await find_active_play_threads(
                 interaction.guild,
                 context.forum,
                 context.play_game,
-                context.required_tag,
                 interaction.user,
             )
         except discord.HTTPException as e:
@@ -1841,10 +1926,10 @@ class Play(commands.Cog):
             )
             return
 
-        if existing_thread is not None:
+        if existing_threads:
             await self._send_duplicate_confirmation(
                 interaction,
-                existing_thread=existing_thread,
+                existing_threads=existing_threads,
                 forum=context.forum,
                 play_game=context.play_game,
                 required_tag=context.required_tag,
@@ -1869,7 +1954,7 @@ class Play(commands.Cog):
         self,
         interaction: discord.Interaction,
         *,
-        existing_thread: discord.Thread,
+        existing_threads: list[discord.Thread],
         forum: discord.ForumChannel,
         play_game: PlayGame,
         required_tag: discord.ForumTag,
@@ -1884,38 +1969,39 @@ class Play(commands.Cog):
             )
             return
 
-        try:
-            await existing_thread.edit(
-                archived=True,
-                locked=True,
-                reason=(
-                    f"Replace active playthrough post for "
-                    f"{interaction.user} ({interaction.user.id})"
-                ),
-            )
-        except discord.Forbidden:
-            await interaction.edit_original_response(
-                content=(
-                    f"I could not archive {existing_thread.mention}. "
-                    "Check my Manage Threads permission."
-                ),
-                view=None,
-            )
-            return
-        except discord.HTTPException as e:
-            await interaction.edit_original_response(
-                content=f"Discord rejected the archive request: `{e}`",
-                view=None,
-            )
-            return
+        for existing_thread in existing_threads:
+            try:
+                await existing_thread.edit(
+                    archived=True,
+                    locked=True,
+                    reason=(
+                        f"Replace active playthrough post for "
+                        f"{interaction.user} ({interaction.user.id})"
+                    ),
+                )
+            except discord.Forbidden:
+                await interaction.edit_original_response(
+                    content=(
+                        f"I could not archive {_thread_reference(existing_thread)}. "
+                        "Check my Manage Threads permission."
+                    ),
+                    view=None,
+                )
+                return
+            except discord.HTTPException as e:
+                await interaction.edit_original_response(
+                    content=f"Discord rejected the archive request: `{e}`",
+                    view=None,
+                )
+                return
 
-        log(
-            f"PLAY // DUPLICATE ARCHIVED 『 THREAD {existing_thread.id} 』 "
-            f"GAME 『 {play_game.key} 』 USER 『 {interaction.user.id} 』 "
-            f"GUILD 『 {interaction.guild.id} 』",
-            level="debug",
-            logger_name="play",
-        )
+            log(
+                f"PLAY // DUPLICATE ARCHIVED 『 THREAD {existing_thread.id} 』 "
+                f"GAME 『 {play_game.key} 』 USER 『 {interaction.user.id} 』 "
+                f"GUILD 『 {interaction.guild.id} 』",
+                level="debug",
+                logger_name="play",
+            )
 
         if selected_tag_ids is None:
             await self._send_spoiler_tag_prompt(
@@ -2008,19 +2094,21 @@ class Play(commands.Cog):
         self._inflight_creates.add(lock_key)
         try:
             if check_duplicate:
-                existing_thread, lookup_ok = await self._find_active_play_thread_or_respond(
+                (
+                    existing_threads,
+                    lookup_ok,
+                ) = await self._find_active_play_threads_or_respond(
                     interaction,
                     forum=forum,
                     play_game=play_game,
-                    required_tag=required_tag,
                     member=interaction.user,
                 )
                 if not lookup_ok:
                     return
-                if existing_thread is not None:
+                if existing_threads:
                     await self._send_duplicate_confirmation(
                         interaction,
-                        existing_thread=existing_thread,
+                        existing_threads=existing_threads,
                         forum=forum,
                         play_game=play_game,
                         required_tag=required_tag,
@@ -2488,6 +2576,43 @@ class Play(commands.Cog):
                 view=None,
             )
             return
+
+        game_name = play_thread_game_name(context.thread.name)
+        if game_name is not None:
+            try:
+                active_matches = await find_active_play_threads_by_name(
+                    interaction.guild,
+                    self._configured_play_forums(interaction.guild.id),
+                    game_name=game_name,
+                    member=interaction.user,
+                    exclude_thread_id=context.thread.id,
+                )
+            except discord.HTTPException as e:
+                log(
+                    f"PLAY // ACTIVE THREAD LOOKUP FAILED "
+                    f"『 GUILD {interaction.guild.id} 』 // {e}",
+                    level="debug",
+                    logger_name="play",
+                )
+                await interaction.edit_original_response(
+                    content=(
+                        "I couldn't check existing active playthrough posts right now. "
+                        "Please try again in a moment."
+                    ),
+                    view=None,
+                )
+                return
+
+            if active_matches:
+                await interaction.edit_original_response(
+                    content=(
+                        "The existing playthrough must be archived before "
+                        f"unlocking another: {_thread_reference(active_matches[0])}"
+                    ),
+                    view=None,
+                    allowed_mentions=NO_MENTIONS,
+                )
+                return
 
         permission_error = self._missing_bot_thread_permissions(
             interaction.guild,

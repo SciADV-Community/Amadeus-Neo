@@ -18,6 +18,7 @@ from cogs.play import (
     calculate_spoiler_flags,
     configured_playthrough_thread_context,
     find_active_play_thread,
+    find_active_play_threads,
     find_active_owned_playthrough_threads,
     load_play_lock_sweep_checkpoint,
     find_forum_tag,
@@ -405,26 +406,43 @@ def test_find_active_play_thread_matches_username_in_active_post_name():
         name="Steins;Gate | @Server Nickname",
         parent_id=20,
         tags=[tag],
+        archived=False,
     )
     exact_untagged_thread = FakeThread(
         name="Steins;Gate | @zips",
         parent_id=20,
         tags=[],
+        archived=False,
     )
     username_thread = FakeThread(
         name="Steins;Gate replay | @zips",
         parent_id=20,
         tags=[tag],
+        archived=False,
+    )
+    tag_only_thread = FakeThread(
+        name="Occultic;Nine | @zips",
+        parent_id=20,
+        tags=[tag],
+        archived=False,
     )
 
     class Guild:
         async def active_threads(self):
-            return [nickname_thread, exact_untagged_thread, username_thread]
+            return [
+                nickname_thread,
+                exact_untagged_thread,
+                username_thread,
+                tag_only_thread,
+            ]
 
     assert (
         asyncio.run(find_active_play_thread(Guild(), forum, game, tag, member))
         is exact_untagged_thread
     )
+    assert asyncio.run(find_active_play_threads(Guild(), forum, game, member)) == [
+        exact_untagged_thread
+    ]
 
 
 def test_missing_play_forum_permissions_lists_only_missing_permissions():
@@ -1138,7 +1156,7 @@ def test_duplicate_confirmation_prompt_uses_ephemeral_buttons(temp_db_path):
         asyncio.run(
             cog._send_duplicate_confirmation(
                 interaction,
-                existing_thread=SimpleNamespace(mention="#steins-gate"),
+                existing_threads=[SimpleNamespace(mention="#steins-gate")],
                 forum=SimpleNamespace(id=10),
                 play_game=SimpleNamespace(display_name="Steins;Gate", key="steins;gate"),
                 required_tag=SimpleNamespace(id=20),
@@ -1356,6 +1374,144 @@ def test_play_new_modal_submit_shows_duplicate_buttons_before_creation(
     assert duplicate_view.selected_tag_ids == [50]
 
 
+def test_play_new_duplicate_prompt_lists_multiple_active_threads_by_name(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    game_tag = SimpleNamespace(id=10, name="Steins;Gate")
+    spoiler_tag = SimpleNamespace(id=50, name="Steins;Gate MDE")
+    forum = FakeForum(
+        [game_tag, spoiler_tag],
+        SimpleNamespace(
+            view_channel=True,
+            send_messages=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_threads=True,
+        ),
+        forum_id=20,
+        name="playthroughs",
+    )
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    first_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[],
+        thread_id=30,
+        archived=False,
+        mention="#steins-gate-a",
+    )
+    second_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[game_tag],
+        thread_id=31,
+        archived=False,
+        mention="#steins-gate-b",
+    )
+    tag_only_thread = FakeThread(
+        name="Occultic;Nine | @zips",
+        parent_id=20,
+        tags=[game_tag, spoiler_tag],
+        thread_id=32,
+        archived=False,
+        mention="#occultic-nine",
+    )
+    guild = SimpleNamespace(
+        id=1,
+        me=FakeMember(id=999),
+        active_threads=AsyncMock(
+            return_value=[first_thread, second_thread, tag_only_thread]
+        ),
+    )
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+    cog._get_forum_channel = AsyncMock(return_value=forum)
+
+    try:
+        asyncio.run(Play.play_new.callback(cog, interaction))
+        modal = interaction.response.modals[0]
+        modal.game_select._values = ["steins;gate"]
+        modal.replay_select._values = ["false"]
+        modal.spoiler_select._values = ["20:50"]
+
+        submit_interaction = FakeInteraction(guild, user=user)
+        asyncio.run(modal.on_submit(submit_interaction))
+
+        duplicate_view = submit_interaction.edits[0]["view"]
+    finally:
+        cog.cog_unload()
+
+    assert submit_interaction.edits[0]["content"] == (
+        "Multiple active Steins;Gate channels by you were found:\n"
+        "- #steins-gate-a\n"
+        "- #steins-gate-b\n\n"
+        "Would you like to archive them?"
+    )
+    assert duplicate_view.existing_threads == [first_thread, second_thread]
+    assert [item.label for item in duplicate_view.children] == ["No", "Yes"]
+
+
+def test_archive_duplicate_and_continue_archives_all_existing_threads(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    guild = SimpleNamespace(id=1, me=FakeMember(id=999))
+    interaction = FakeInteraction(guild, user=user)
+    first_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[],
+        thread_id=30,
+        archived=False,
+    )
+    second_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        thread_id=31,
+        archived=False,
+    )
+    forum = FakeForum([tag], SimpleNamespace(), forum_id=20)
+    cog = Play(SimpleNamespace())
+    cog._create_playthrough_thread_unlocked = AsyncMock()
+
+    try:
+        asyncio.run(
+            cog.archive_duplicate_and_continue(
+                interaction,
+                existing_threads=[first_thread, second_thread],
+                forum=forum,
+                play_game=SimpleNamespace(display_name="Steins;Gate", key="steins;gate"),
+                required_tag=tag,
+                selected_tag_ids=[],
+                replay=False,
+                auto_archive_duration=None,
+            )
+        )
+    finally:
+        cog.cog_unload()
+
+    expected_reason = f"Replace active playthrough post for {user} ({user.id})"
+    assert first_thread.edit_calls == [
+        {"archived": True, "locked": True, "reason": expected_reason}
+    ]
+    assert second_thread.edit_calls == [
+        {"archived": True, "locked": True, "reason": expected_reason}
+    ]
+    cog._create_playthrough_thread_unlocked.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("replay", "expected_tag_ids"),
     [
@@ -1435,19 +1591,18 @@ def test_active_thread_lookup_failure_edits_original_response(temp_db_path):
     cog = Play(SimpleNamespace())
 
     try:
-        thread, ok = asyncio.run(
-            cog._find_active_play_thread_or_respond(
+        threads, ok = asyncio.run(
+            cog._find_active_play_threads_or_respond(
                 interaction,
                 forum=SimpleNamespace(id=10),
                 play_game=SimpleNamespace(display_name="Steins;Gate", key="steins;gate"),
-                required_tag=SimpleNamespace(id=20),
                 member=SimpleNamespace(id=30),
             )
         )
     finally:
         cog.cog_unload()
 
-    assert thread is None
+    assert threads == []
     assert ok is False
     assert interaction.edits == [
         {
@@ -2137,7 +2292,11 @@ def test_unlock_channel_lists_owned_archived_threads_and_reopens_selection(
 
             return iterator()
 
-    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[]),
+    )
     interaction = FakeInteraction(guild, user=user)
     message = FakeMessage(channel=selected_thread, content="Open this")
     cog = Play(SimpleNamespace())
@@ -2210,7 +2369,11 @@ def test_unlock_channel_finishes_active_locked_thread(temp_db_path, monkeypatch)
 
             return iterator()
 
-    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[]),
+    )
     interaction = FakeInteraction(guild, user=user)
     message = FakeMessage(channel=thread, content="Open this")
     cog = Play(SimpleNamespace())
@@ -2245,6 +2408,64 @@ def test_unlock_channel_finishes_active_locked_thread(temp_db_path, monkeypatch)
         {
             "content": "Unlocked playthrough post: #thread",
             "view": None,
+        }
+    ]
+
+
+def test_unlock_submit_rejects_active_channel_for_same_game(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    archived_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        thread_id=30,
+        archived=True,
+        locked=True,
+        mention="#archived-thread",
+    )
+    active_thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[],
+        thread_id=31,
+        archived=False,
+        locked=False,
+        mention="#active-thread",
+    )
+    guild = SimpleNamespace(
+        id=1,
+        me=SimpleNamespace(id=999),
+        active_threads=AsyncMock(return_value=[active_thread]),
+    )
+    interaction = FakeInteraction(guild, user=user)
+    cog = Play(SimpleNamespace())
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        asyncio.run(
+            cog.unlock_playthrough_thread_from_confirmation(
+                interaction,
+                thread=archived_thread,
+            )
+        )
+    finally:
+        cog.cog_unload()
+
+    assert archived_thread.edit_calls == []
+    assert interaction.edits == [
+        {
+            "content": (
+                "The existing playthrough must be archived before "
+                "unlocking another: #active-thread"
+            ),
+            "view": None,
+            "allowed_mentions": play_module.NO_MENTIONS,
         }
     ]
 

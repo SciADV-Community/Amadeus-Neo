@@ -64,7 +64,7 @@ The `/play new` modal lists configured games, a replay selector, and configured 
 
 `/play end` first checks the current channel. If it is one of your unarchived configured playthrough posts, the bot opens a modal with that post selected. Otherwise, the bot scans active threads for configured playthrough posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting archives and locks the selected post.
 
-`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens the same modal select as `Unlock Channel`. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post.
+`/play unlock` scans configured playthrough forums for locked or archived posts named for your Discord username and opens a modal select. Each option includes the post's last post date. Submitting unlocks and unarchives the selected post.
 
 ## Message Context Menus
 
@@ -74,9 +74,8 @@ Discord message context commands cannot be registered for only some channels, so
 |---|---|
 | `Delete Message` | Open a modal to confirm and delete a message from one of your unlocked playthrough posts |
 | `Pin Message` | Open a modal to confirm and pin a message in one of your unlocked playthrough posts |
-| `Unlock Channel` | Open a modal to choose and reopen one of your locked or archived playthrough posts |
 
-The selected message must be inside a configured playthrough forum post, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message` and `Pin Message` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels. `Unlock Channel` uses the selected message only to validate access, then opens a modal select listing the user's locked or archived playthrough posts found in configured playthrough forums, with each option showing the last post date.
+The selected message must be inside a configured playthrough forum post, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message` and `Pin Message` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels.
 
 ## Admin Commands
 

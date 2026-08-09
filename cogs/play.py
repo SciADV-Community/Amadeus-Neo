@@ -65,7 +65,6 @@ _PLAY_THREAD_OWNER_SEPARATOR = " | @"
 _PLAY_CONTEXT_MENU_NAMES: tuple[str, ...] = (
     "Delete Message",
     "Pin Message",
-    "Unlock Channel",
 )
 _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE = (
     "You can not delete bot or moderator messages."
@@ -1239,7 +1238,6 @@ class Play(commands.Cog):
             for name, callback in (
                 ("Delete Message", self.delete_message_context_menu),
                 ("Pin Message", self.pin_message_context_menu),
-                ("Unlock Channel", self.unlock_channel_context_menu),
             )
         )
 

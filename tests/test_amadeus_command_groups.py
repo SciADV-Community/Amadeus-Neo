@@ -1,5 +1,7 @@
 import asyncio
 
+import discord
+
 from cogs.activity_admin import setup as setup_activity_admin
 from cogs.amadeus_admin import AmadeusAdmin
 from cogs.boost_admin import setup as setup_boost_admin
@@ -9,9 +11,27 @@ from cogs.play import setup as setup_play
 from cogs.play_admin import setup as setup_play_admin
 
 
+class FakeTree:
+    def __init__(self):
+        self.commands = []
+        self.removed = []
+
+    def add_command(self, command, **kwargs):
+        self.commands.append(command)
+
+    def remove_command(self, command, **kwargs):
+        self.removed.append((command, kwargs))
+        for existing in list(self.commands):
+            if existing.name == command:
+                self.commands.remove(existing)
+                return existing
+        return None
+
+
 class FakeBot:
     def __init__(self):
         self._cogs = {}
+        self.tree = FakeTree()
         self.views = []
 
     def get_cog(self, name):
@@ -101,7 +121,9 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
         }
         assert command_names(amadeus._children["play"]) == {
             "set-forum",
+            "remove-forum",
             "add-game",
+            "set-order",
             "remove-game",
             "list-games",
             "archive-duration",
@@ -142,6 +164,16 @@ def test_public_roots_remain_member_facing_only(temp_db_path):
         assert honeypot.__cog_app_commands__ == []
 
         assert [command.name for command in play.__cog_app_commands__] == ["play"]
+        assert command_names(play.play) == {"new", "delete", "end", "unlock"}
+        assert {
+            command.name
+            for command in bot.tree.commands
+            if command.type is discord.AppCommandType.message
+        } == {
+            "Delete Message",
+            "Pin Message",
+            "Unlock Channel",
+        }
         assert play_admin.__cog_app_commands__ == []
     finally:
         unload_all(bot)

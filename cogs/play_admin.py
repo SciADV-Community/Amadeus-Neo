@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -5,6 +7,7 @@ from discord.ext import commands
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import escape_untrusted_text
 from amadeus.logging_utils import log
+from amadeus.models.play import PlayGame
 from amadeus.module_guard import require_module_enabled_for_interaction
 from amadeus.permissions import require_amadeus_access
 from amadeus.play_store import PlayStore
@@ -27,6 +30,16 @@ AUTO_ARCHIVE_CHOICES = [
 ]
 VALID_AUTO_ARCHIVE_DURATIONS = {choice.value for choice in AUTO_ARCHIVE_CHOICES}
 MAX_FORUM_TAG_NAME_LENGTH = 20
+MAX_REMOVE_FORUM_OPTIONS = 25
+
+
+@dataclass(frozen=True)
+class ConfiguredPlayForum:
+    forum_id: int
+    label: str
+    reference: str
+    games: tuple[PlayGame, ...]
+    is_default: bool = False
 
 
 def tag_name_error(name: str) -> str | None:
@@ -61,12 +74,235 @@ def parse_channel_id(value: str) -> int | None:
     return int(value)
 
 
+def _remove_forum_confirmation_content(target: ConfiguredPlayForum) -> str:
+    game_lines = [
+        f"- {game.sort_order}. {escape_untrusted_text(game.display_name)}"
+        for game in target.games
+    ] or ["- No games configured for this forum."]
+    games_text = "\n".join(game_lines)
+    default_note = "\nDefault forum: yes" if target.is_default else ""
+    return (
+        "Are you sure you want to delete this Forum channel?\n\n"
+        f"Forum: {target.reference}{default_note}\n"
+        "This removes these games from Amadeus play configuration first.\n\n"
+        "Configured games for this channel:\n"
+        f"{games_text}"
+    )
+
+
+def _delete_forum_channel_confirmation_content(
+    *,
+    forum_reference: str,
+    removed_games: list[PlayGame],
+) -> str:
+    return (
+        "ARE YOU SURE?\n"
+        "Removal will attempt to delete the channel and all contained threads."
+    )
+
+
+def _remove_forum_placeholder_content() -> str:
+    return (
+        "Select a configured playthrough forum to review the games that will be "
+        "removed."
+    )
+
+
+class _RemoveForumSelect(discord.ui.Select):
+    def __init__(self, forums: list[ConfiguredPlayForum]) -> None:
+        super().__init__(
+            placeholder="Configured forum",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=forum.label[:100],
+                    value=str(forum.forum_id),
+                    description=f"{len(forum.games)} configured game(s)",
+                )
+                for forum in forums[:MAX_REMOVE_FORUM_OPTIONS]
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, _RemoveForumConfirmationView):
+            await interaction.response.defer()
+            return
+
+        try:
+            view.selected_forum_id = int(self.values[0])
+        except (IndexError, ValueError):
+            await interaction.response.defer()
+            return
+
+        for option in self.options:
+            option.default = option.value == str(view.selected_forum_id)
+
+        target = view.selected_target
+        view.set_confirm_enabled(target is not None)
+        await interaction.response.edit_message(
+            content=(
+                _remove_forum_confirmation_content(target)
+                if target is not None
+                else "That playthrough forum is no longer available."
+            ),
+            view=view,
+        )
+
+
+class _RemoveForumConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "PlayAdmin",
+        requester_id: int,
+        guild_id: int,
+        forums: list[ConfiguredPlayForum],
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.forums = {
+            forum.forum_id: forum
+            for forum in forums[:MAX_REMOVE_FORUM_OPTIONS]
+        }
+        self.selected_forum_id: int | None = None
+
+        if forums:
+            self.add_item(_RemoveForumSelect(forums))
+        self.set_confirm_enabled(False)
+
+    @property
+    def selected_target(self) -> ConfiguredPlayForum | None:
+        if self.selected_forum_id is None:
+            return None
+        return self.forums.get(self.selected_forum_id)
+
+    def set_confirm_enabled(self, enabled: bool) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.label == "Yes":
+                child.disabled = not enabled
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this confirmation can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This confirmation is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger, row=1)
+    async def yes(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        target = self.selected_target
+        if target is None:
+            await interaction.response.edit_message(
+                content=_remove_forum_placeholder_content(),
+                view=self,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.stop()
+        await self.cog.remove_play_forum_from_confirmation(
+            interaction,
+            forum_id=target.forum_id,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Playthrough forum removal cancelled.",
+            view=None,
+        )
+        self.stop()
+
+
+class _DeleteForumChannelConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        cog: "PlayAdmin",
+        requester_id: int,
+        guild_id: int,
+        forum_id: int,
+        forum_reference: str,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.forum_id = forum_id
+        self.forum_reference = forum_reference
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the user who started this confirmation can use these controls.",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "This confirmation is no longer valid.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Delete Forum", style=discord.ButtonStyle.danger, row=0)
+    async def delete_forum(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.stop()
+        await self.cog.delete_play_forum_channel_from_confirmation(
+            interaction,
+            forum_id=self.forum_id,
+            forum_reference=self.forum_reference,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            content=(
+                "Discord forum deletion cancelled. Amadeus play configuration "
+                "changes were already applied."
+            ),
+            view=None,
+        )
+        self.stop()
+
+
 class PlayAdmin(commands.Cog):
     """
     Admin cog for the play module.
 
-    Commands: /amadeus play set-forum, add-game, remove-game, list-games, archive-duration,
-    auto-archive, config
+    Commands: /amadeus play set-forum, remove-forum, add-game, set-order,
+    remove-game, list-games, archive-duration, auto-archive, config
     """
 
     play = app_commands.Group(
@@ -170,6 +406,42 @@ class PlayAdmin(commands.Cog):
             config.forum_channel_id if config else None,
         )
 
+    async def _configured_play_forum_targets(
+        self,
+        guild: discord.Guild,
+    ) -> list[ConfiguredPlayForum]:
+        config = self.play_store.get_config(guild.id)
+        default_forum_id = config.forum_channel_id if config else None
+        targets: list[ConfiguredPlayForum] = []
+        games_by_forum_id: dict[int, list[PlayGame]] = {}
+
+        for game in self.play_store.list_games(guild.id):
+            forum_id = game.forum_channel_id or default_forum_id
+            if forum_id is None:
+                continue
+            games_by_forum_id.setdefault(forum_id, []).append(game)
+
+        for forum_id in sorted(games_by_forum_id):
+            forum = await self._get_forum_channel(guild, forum_id)
+            if forum is None:
+                label = f"Forum {forum_id}"
+                reference = f"`{forum_id}`"
+            else:
+                label = f"#{forum.name}"
+                reference = forum.mention
+
+            targets.append(
+                ConfiguredPlayForum(
+                    forum_id=forum_id,
+                    label=label,
+                    reference=reference,
+                    games=tuple(games_by_forum_id[forum_id]),
+                    is_default=forum_id == default_forum_id,
+                )
+            )
+
+        return targets
+
     # ========================================================
     # /amadeus play set-forum
     # ========================================================
@@ -211,17 +483,171 @@ class PlayAdmin(commands.Cog):
         )
 
     # ========================================================
+    # /amadeus play remove-forum
+    # ========================================================
+
+    @play.command(
+        name="remove-forum",
+        description="Remove a configured playthrough forum.",
+    )
+    async def play_remove_forum(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        config = await require_amadeus_access(interaction, self.module_store)
+        if config is None or interaction.guild is None:
+            return
+
+        forums = await self._configured_play_forum_targets(interaction.guild)
+        if not forums:
+            await interaction.response.send_message(
+                "No playthrough forums are configured.",
+                ephemeral=True,
+            )
+            return
+
+        view = _RemoveForumConfirmationView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            forums=forums,
+        )
+        await interaction.response.send_message(
+            _remove_forum_placeholder_content(),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def remove_play_forum_from_confirmation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.edit_original_response(
+                content="This can only be used inside a server.",
+                view=None,
+            )
+            return
+
+        current_forums = await self._configured_play_forum_targets(interaction.guild)
+        target = next(
+            (forum for forum in current_forums if forum.forum_id == forum_id),
+            None,
+        )
+        if target is None:
+            await interaction.edit_original_response(
+                content="That playthrough forum is no longer configured.",
+                view=None,
+            )
+            return
+
+        removed_games, removed_default = self.play_store.remove_forum(
+            interaction.guild.id,
+            forum_id,
+        )
+        delete_view = _DeleteForumChannelConfirmationView(
+            cog=self,
+            requester_id=interaction.user.id,
+            guild_id=interaction.guild.id,
+            forum_id=forum_id,
+            forum_reference=target.reference,
+        )
+
+        log(
+            f"PLAY // FORUM REMOVED 『 CHANNEL {forum_id} 』 "
+            f"DEFAULT {removed_default} GAMES {[game.key for game in removed_games]} "
+            f"GUILD 『 {interaction.guild.id} 』",
+            level="debug",
+            logger_name="play",
+        )
+
+        await interaction.edit_original_response(
+            content=_delete_forum_channel_confirmation_content(
+                forum_reference=target.reference,
+                removed_games=removed_games,
+            ),
+            view=delete_view,
+        )
+
+    async def delete_play_forum_channel_from_confirmation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        forum_id: int,
+        forum_reference: str,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.edit_original_response(
+                content="This can only be used inside a server.",
+                view=None,
+            )
+            return
+
+        forum = await self._get_forum_channel(interaction.guild, forum_id)
+        if forum is None:
+            await interaction.edit_original_response(
+                content=(
+                    f"{forum_reference} was removed from Amadeus play configuration, "
+                    "but the Discord forum channel could not be found."
+                ),
+                view=None,
+            )
+            return
+
+        try:
+            await forum.delete(
+                reason=(
+                    f"Playthrough forum deleted by "
+                    f"{interaction.user} ({interaction.user.id})"
+                )
+            )
+        except discord.Forbidden:
+            await interaction.edit_original_response(
+                content=(
+                    f"{forum_reference} was removed from Amadeus play configuration, "
+                    "but I could not delete the Discord forum channel. "
+                    "Check my Manage Channels permission."
+                ),
+                view=None,
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.edit_original_response(
+                content=(
+                    f"{forum_reference} was removed from Amadeus play configuration, "
+                    f"but Discord rejected the forum channel deletion: `{e}`"
+                ),
+                view=None,
+            )
+            return
+
+        log(
+            f"PLAY // FORUM CHANNEL DELETED 『 CHANNEL {forum_id} 』 "
+            f"GUILD 『 {interaction.guild.id} 』",
+            level="debug",
+            logger_name="play",
+        )
+
+        await interaction.edit_original_response(
+            content=f"Deleted Discord forum channel {forum_reference}.",
+            view=None,
+        )
+
+    # ========================================================
     # /amadeus play add-game
     # ========================================================
 
     @play.command(
         name="add-game",
-        description="Add or update a game available from /play.",
+        description="Add or update a game available from /play new.",
     )
     @app_commands.describe(
         name="Game name shown to users.",
         forum="Forum channel for this game. Defaults to `/amadeus play set-forum`.",
         tag_name="Forum tag to use. Defaults to the game name.",
+        order="Position in `/play new`. Defaults to the end.",
     )
     async def play_add_game(
         self,
@@ -229,9 +655,17 @@ class PlayAdmin(commands.Cog):
         name: str,
         forum: discord.ForumChannel | None = None,
         tag_name: str | None = None,
+        order: int | None = None,
     ) -> None:
         config = await require_amadeus_access(interaction, self.module_store)
         if config is None or interaction.guild is None:
+            return
+
+        if order is not None and order < 1:
+            await interaction.response.send_message(
+                "Game order must be **1** or higher.",
+                ephemeral=True,
+            )
             return
 
         name = name.strip()
@@ -284,18 +718,80 @@ class PlayAdmin(commands.Cog):
                 )
                 return
 
-        game = self.play_store.save_game(interaction.guild.id, name, forum.id, tag.id)
+        game = self.play_store.save_game(
+            interaction.guild.id,
+            name,
+            forum.id,
+            tag.id,
+            sort_order=order,
+        )
         log(
             f"PLAY // GAME SAVED 『 {game.key} 』 FORUM 『 {forum.id} 』 TAG 『 {tag.id} 』 "
-            f"GUILD 『 {interaction.guild.id} 』",
+            f"ORDER {game.sort_order} GUILD 『 {interaction.guild.id} 』",
             level="debug",
             logger_name="play",
         )
 
         tag_note = "created and linked" if tag_created else "linked"
         await interaction.response.send_message(
-            f"Added **{escape_untrusted_text(game.display_name)}** to `/play`; "
-            f"forum {forum.mention}; tag **{escape_untrusted_text(tag.name)}** {tag_note}.",
+            f"Added **{escape_untrusted_text(game.display_name)}** to `/play new`; "
+            f"order **{game.sort_order}**; forum {forum.mention}; "
+            f"tag **{escape_untrusted_text(tag.name)}** {tag_note}.",
+            ephemeral=True,
+        )
+
+    # ========================================================
+    # /amadeus play set-order
+    # ========================================================
+
+    @play.command(
+        name="set-order",
+        description="Set a game's position in /play new.",
+    )
+    @app_commands.describe(
+        game="Configured game to move.",
+        order="Position in `/play new`.",
+    )
+    @app_commands.autocomplete(game=game_autocomplete)
+    async def play_set_order(
+        self,
+        interaction: discord.Interaction,
+        game: str,
+        order: int,
+    ) -> None:
+        config = await require_amadeus_access(interaction, self.module_store)
+        if config is None or interaction.guild is None:
+            return
+
+        if order < 1:
+            await interaction.response.send_message(
+                "Game order must be **1** or higher.",
+                ephemeral=True,
+            )
+            return
+
+        updated = self.play_store.set_game_order(
+            interaction.guild.id,
+            game,
+            order,
+        )
+        if updated is None:
+            await interaction.response.send_message(
+                "That game is not configured for `/play new`.",
+                ephemeral=True,
+            )
+            return
+
+        log(
+            f"PLAY // GAME ORDER SET 『 {updated.key} 』 ORDER {updated.sort_order} "
+            f"GUILD 『 {interaction.guild.id} 』",
+            level="debug",
+            logger_name="play",
+        )
+
+        await interaction.response.send_message(
+            f"Set **{escape_untrusted_text(updated.display_name)}** to order "
+            f"**{updated.sort_order}** in `/play new`.",
             ephemeral=True,
         )
 
@@ -305,7 +801,7 @@ class PlayAdmin(commands.Cog):
 
     @play.command(
         name="remove-game",
-        description="Remove a game from /play.",
+        description="Remove a game from /play new.",
     )
     @app_commands.describe(game="Configured game to remove.")
     @app_commands.autocomplete(game=game_autocomplete)
@@ -321,7 +817,7 @@ class PlayAdmin(commands.Cog):
         existing = self.play_store.get_game(interaction.guild.id, game, enabled_only=False)
         if existing is None:
             await interaction.response.send_message(
-                "That game is not configured for `/play`.",
+                "That game is not configured for `/play new`.",
                 ephemeral=True,
             )
             return
@@ -334,7 +830,7 @@ class PlayAdmin(commands.Cog):
         )
 
         await interaction.response.send_message(
-            f"Removed **{escape_untrusted_text(existing.display_name)}** from `/play`.",
+            f"Removed **{escape_untrusted_text(existing.display_name)}** from `/play new`.",
             ephemeral=True,
         )
 
@@ -344,7 +840,7 @@ class PlayAdmin(commands.Cog):
 
     @play.command(
         name="list-games",
-        description="List games configured for /play.",
+        description="List games configured for /play new.",
     )
     async def play_list_games(self, interaction: discord.Interaction) -> None:
         config = await require_amadeus_access(interaction, self.module_store)
@@ -383,7 +879,8 @@ class PlayAdmin(commands.Cog):
                 tag_text = f"Tag ID: `{game.forum_tag_id}`"
 
             lines.append(
-                f"**{escape_untrusted_text(game.display_name)}** — {forum_text} — {tag_text}"
+                f"**{game.sort_order}. {escape_untrusted_text(game.display_name)}** "
+                f"— {forum_text} — {tag_text}"
             )
 
         embed = discord.Embed(
@@ -490,7 +987,7 @@ class PlayAdmin(commands.Cog):
         )
         if not configured_tag_ids:
             await interaction.response.send_message(
-                f"`{configured_channel_id}` is not configured for any `/play` games.",
+                f"`{configured_channel_id}` is not configured for any playthrough games.",
                 ephemeral=True,
             )
             return
@@ -558,7 +1055,7 @@ class PlayAdmin(commands.Cog):
             await interaction.edit_original_response(
                 content=(
                     f"{resolved_channel.mention} is not configured for any "
-                    "`/play` games."
+                    "playthrough games."
                 ),
             )
             return

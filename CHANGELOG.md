@@ -1,6 +1,8 @@
 # Changelog
 
 ---
+### 1.8.0
+- Major overhaul of the `/play` module, adding modals and a new UI.
 
 ### 1.7.6
 - Added a monthly archived playthrough lock sweep with a 14-day default grace period.

@@ -1,6 +1,31 @@
 # Changelog
 
 ---
+### 1.8.1
+- `/play unlock` could time out if it scans before responding to discord
+- `/play unlock` has an ephemeral picker if it takes to long (the popup only works if the bot responds in under 3 seconds)
+- `/play unlock` check was very inefficient with the database; it just does a lookup once and keeps it now.
+- `/play unlock` checks would cry about timing out if there was an issue. It now gives something more useful
+- `/play unlock` fallback for channel lookup no longer uses tags
+- `/play end` also had a tag check. I think I had planned to do something with this and roles early on
+- `/play end` will now attempt to set the current thread as default in the modal popup, if it belongs to the initiator
+- `/play new` will give an ephemeral picker before the popup if there's more than one playthrough forum
+   - One playthrough forum will still go straight to the picker
+- `/play new` no longer shows the tag for the game you pick. If you pick replay, it will apply it automatically
+    - It will also call you out directly if you try to forge it
+- `/play new` now only takes 4 tags to make sure there's no issue with replay's 5th tag
+- `/play new` logic caps forums at 20 games configured max (this is admin stuff, max 20 tags in a forum)
+- `/play new` triple checks tags belong to the forum chosen; previously there was a bug where it'd try to show everything
+- Duplicate playthrough checks once when prompting and then again after confirmation, preventing you from side-channeling an unlock in another channel
+- new/end/delete/unlock has a limit of 25 entries shown; it will communicate to you if you somehow have more
+- new/end/delete/unlock now properly sort channels by last post
+- Added a check for some config failures related to the admin role deletion protection
+- Removed some old code related to the right-click unlock function
+- Removed some old code related to spoiler selection (this was screwing up the ordering)
+- Automatic play cleanup now starts when the cog (module) loads
+- Admin config check actually confirms all permissions on the forum channel when run
+
+
 ### 1.8.0
 - Major overhaul of the `/play` module, adding modals and a new UI.
 

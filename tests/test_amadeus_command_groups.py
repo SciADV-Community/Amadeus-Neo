@@ -172,6 +172,7 @@ def test_public_roots_remain_member_facing_only(temp_db_path):
         } == {
             "Delete Message",
             "Pin Message",
+            "Unpin",
         }
         assert play_admin.__cog_app_commands__ == []
     finally:

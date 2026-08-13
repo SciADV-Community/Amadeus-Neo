@@ -45,7 +45,7 @@ The bot needs these permissions in every configured playthrough forum channel:
 
 `Read Message History` is used by the monthly archived-post lock sweep. If that permission is missing, members can still create playthrough posts, but the bot will skip archived locking for that forum and log a warning.
 
-`Manage Messages` is used only for the `Delete Message` and `Pin Message` context menu actions.
+`Manage Messages` is used only for the `Delete Message`, `Pin Message`, and `Unpin` context menu actions.
 
 Members must also have **View Channels** and **Send Messages in Threads** in the configured forum. `/play new` will not create a post in a forum the member cannot access.
 
@@ -74,8 +74,9 @@ Discord message context commands cannot be registered for only some channels, so
 |---|---|
 | `Delete Message` | Open a modal to confirm and delete a message from one of your unlocked playthrough posts |
 | `Pin Message` | Open a modal to confirm and pin a message in one of your unlocked playthrough posts |
+| `Unpin` | Open a modal to confirm and unpin a message in one of your unlocked playthrough posts |
 
-The selected message must be inside a configured playthrough forum post named for a configured game, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message` and `Pin Message` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels.
+The selected message must be inside a configured playthrough forum post named for a configured game, and the post name must end with the command-runner's current Discord username in the `<game> | @username` format. Nicknames are not used for ownership checks. `Delete Message`, `Pin Message`, and `Unpin` show the message quote and confirmation question as display-only modal components; modal submit confirms, and closing the modal cancels.
 
 ## Admin Commands
 

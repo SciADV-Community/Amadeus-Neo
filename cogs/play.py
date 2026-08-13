@@ -72,6 +72,7 @@ _PLAY_THREAD_OWNER_SEPARATOR = " | @"
 _PLAY_CONTEXT_MENU_NAMES: tuple[str, ...] = (
     "Delete Message",
     "Pin Message",
+    "Unpin",
 )
 _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE = (
     "You can not delete bot or moderator messages."
@@ -943,6 +944,7 @@ class _PlayMessageActionConfirmModal(discord.ui.Modal):
         title = {
             "delete": "Delete Message",
             "pin": "Pin Message",
+            "unpin": "Unpin",
         }[action]
         super().__init__(title=title, timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
@@ -954,6 +956,7 @@ class _PlayMessageActionConfirmModal(discord.ui.Modal):
         prompt = {
             "delete": "Do you want to delete this message?",
             "pin": "Do you want to pin this message?",
+            "unpin": "Do you want to unpin this message?",
         }[action]
         self.quote = discord.ui.TextDisplay(
             f"> {_message_preview(message, max_length=900)}"
@@ -1451,6 +1454,7 @@ class Play(commands.Cog):
             for name, callback in (
                 ("Delete Message", self.delete_message_context_menu),
                 ("Pin Message", self.pin_message_context_menu),
+                ("Unpin", self.unpin_message_context_menu),
             )
         )
 
@@ -3021,7 +3025,7 @@ class Play(commands.Cog):
             )
             return
 
-        if action in {"delete", "pin"} and (
+        if action in {"delete", "pin", "unpin"} and (
             getattr(thread, "archived", False) or getattr(thread, "locked", False)
         ):
             await interaction.response.send_message(
@@ -3030,7 +3034,7 @@ class Play(commands.Cog):
             )
             return
 
-        if action in {"delete", "pin"}:
+        if action in {"delete", "pin", "unpin"}:
             permission_error = self._missing_bot_message_permissions(
                 interaction.guild,
                 thread,
@@ -3046,6 +3050,13 @@ class Play(commands.Cog):
         if action == "pin" and getattr(message, "pinned", False):
             await interaction.response.send_message(
                 "That message is already pinned.",
+                ephemeral=True,
+            )
+            return
+
+        if action == "unpin" and not getattr(message, "pinned", False):
+            await interaction.response.send_message(
+                "That message is not pinned.",
                 ephemeral=True,
             )
             return
@@ -3095,7 +3106,7 @@ class Play(commands.Cog):
             )
             return
 
-        if action in {"delete", "pin"} and (
+        if action in {"delete", "pin", "unpin"} and (
             getattr(thread, "archived", False) or getattr(thread, "locked", False)
         ):
             await interaction.edit_original_response(
@@ -3104,7 +3115,7 @@ class Play(commands.Cog):
             )
             return
 
-        if action in {"delete", "pin"}:
+        if action in {"delete", "pin", "unpin"}:
             permission_error = self._missing_bot_message_permissions(
                 interaction.guild,
                 thread,
@@ -3194,6 +3205,43 @@ class Play(commands.Cog):
             )
             return
 
+        if action == "unpin":
+            if not getattr(message, "pinned", False):
+                await interaction.edit_original_response(
+                    content="That message is not pinned. No changes were made.",
+                    view=None,
+                )
+                return
+
+            try:
+                await message.unpin(
+                    reason=(
+                        f"Playthrough message unpinned by "
+                        f"{interaction.user} ({interaction.user.id})"
+                    ),
+                )
+            except discord.Forbidden:
+                await interaction.edit_original_response(
+                    content=(
+                        "I could not unpin that message. "
+                        "Check my Manage Messages permission."
+                    ),
+                    view=None,
+                )
+                return
+            except discord.HTTPException as e:
+                await interaction.edit_original_response(
+                    content=f"Discord rejected the unpin request: `{e}`",
+                    view=None,
+                )
+                return
+
+            await interaction.edit_original_response(
+                content=f"Unpinned the message in {_thread_reference(thread)}.",
+                view=None,
+            )
+            return
+
     async def delete_message_context_menu(
         self,
         interaction: discord.Interaction,
@@ -3214,6 +3262,17 @@ class Play(commands.Cog):
             interaction,
             message,
             action="pin",
+        )
+
+    async def unpin_message_context_menu(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ) -> None:
+        await self._handle_play_message_context(
+            interaction,
+            message,
+            action="unpin",
         )
 
     @play.command(

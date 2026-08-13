@@ -171,9 +171,13 @@ class FakeMessage:
         self.embeds = []
         self.delete = AsyncMock()
         self.pin = AsyncMock(side_effect=self._pin)
+        self.unpin = AsyncMock(side_effect=self._unpin)
 
     async def _pin(self, **kwargs):
         self.pinned = True
+
+    async def _unpin(self, **kwargs):
+        self.pinned = False
 
 
 def test_game_name_validation_rejects_empty_long_control_and_mentions():
@@ -2590,6 +2594,87 @@ def test_pin_message_confirmation_revalidates_and_pins(
     assert confirm_interaction.edits == [
         {
             "content": "Pinned the message in #thread.",
+            "view": None,
+        }
+    ]
+
+
+def test_unpin_message_rejects_when_message_is_not_pinned(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        archived=False,
+    )
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    interaction = FakeInteraction(guild, user=user)
+    message = FakeMessage(channel=thread, content="Unpin me", pinned=False)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        asyncio.run(cog.unpin_message_context_menu(interaction, message))
+    finally:
+        cog.cog_unload()
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "That message is not pinned.",
+        ephemeral=True,
+    )
+    assert interaction.response.modals == []
+    message.unpin.assert_not_awaited()
+
+
+def test_unpin_message_confirmation_revalidates_and_unpins(
+    temp_db_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(play_module.discord, "Member", FakeMember)
+
+    tag = SimpleNamespace(id=10, name="Steins;Gate")
+    user = FakeMember(id=123, name="zips", display_name="Server Nickname")
+    thread = FakeThread(
+        name="Steins;Gate | @zips",
+        parent_id=20,
+        tags=[tag],
+        archived=False,
+    )
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=999))
+    interaction = FakeInteraction(guild, user=user)
+    message = FakeMessage(channel=thread, content="Unpin me", pinned=True)
+    cog = Play(SimpleNamespace())
+    cog.module_store.enable_module(1, "play")
+    cog.play_store.save_game(1, "Steins;Gate", 20, 10)
+
+    try:
+        asyncio.run(cog.unpin_message_context_menu(interaction, message))
+        modal = interaction.response.modals[0]
+        assert modal.title == "Unpin"
+        assert modal.quote.content == "> Unpin me"
+        assert modal.question.content == "Do you want to unpin this message?"
+
+        confirm_interaction = FakeInteraction(guild, user=user)
+        asyncio.run(
+            modal.on_submit(confirm_interaction)
+        )
+    finally:
+        cog.cog_unload()
+
+    message.unpin.assert_awaited_once_with(
+        reason=f"Playthrough message unpinned by {user} ({user.id})",
+    )
+    assert message.pinned is False
+    assert confirm_interaction.edits == [
+        {
+            "content": "Unpinned the message in #thread.",
             "view": None,
         }
     ]

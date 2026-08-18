@@ -1,6 +1,9 @@
 # Changelog
 
 ---
+### 1.8.2
+- Added "Unpin Message" feature
+
 ### 1.8.1
 - `/play unlock` could time out if it scans before responding to discord
 - `/play unlock` has an ephemeral picker if it takes to long (the popup only works if the bot responds in under 3 seconds)

@@ -72,7 +72,7 @@ _PLAY_THREAD_OWNER_SEPARATOR = " | @"
 _PLAY_CONTEXT_MENU_NAMES: tuple[str, ...] = (
     "Delete Message",
     "Pin Message",
-    "Unpin",
+    "Unpin Message",
 )
 _PLAY_DELETE_PROTECTED_AUTHOR_MESSAGE = (
     "You can not delete bot or moderator messages."
@@ -944,7 +944,7 @@ class _PlayMessageActionConfirmModal(discord.ui.Modal):
         title = {
             "delete": "Delete Message",
             "pin": "Pin Message",
-            "unpin": "Unpin",
+            "unpin": "Unpin Message",
         }[action]
         super().__init__(title=title, timeout=_PLAY_MODAL_TIMEOUT_SECONDS)
         self.cog = cog
@@ -1454,7 +1454,7 @@ class Play(commands.Cog):
             for name, callback in (
                 ("Delete Message", self.delete_message_context_menu),
                 ("Pin Message", self.pin_message_context_menu),
-                ("Unpin", self.unpin_message_context_menu),
+                ("Unpin Message", self.unpin_message_context_menu),
             )
         )
 

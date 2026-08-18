@@ -2657,7 +2657,7 @@ def test_unpin_message_confirmation_revalidates_and_unpins(
     try:
         asyncio.run(cog.unpin_message_context_menu(interaction, message))
         modal = interaction.response.modals[0]
-        assert modal.title == "Unpin"
+        assert modal.title == "Unpin Message"
         assert modal.quote.content == "> Unpin me"
         assert modal.question.content == "Do you want to unpin this message?"
 

@@ -1,6 +1,59 @@
 # Changelog
 
 ---
+### 2.0.0
+- Activity now keeps an all-time count and a separate count for each UTC month
+- Added `/activity monthly status` and `/activity monthly leaderboard`
+- Activity leaderboards now show the top 30 people, 10 at a time
+  - They're ephemeral and have buttons to switch pages
+- `/amadeus activity tier-add` has a `monthly` option for monthly roles
+  - Monthly roles swap over at midnight UTC on the first of the month
+  - If the bot was offline at midnight, it'll catch up when it starts again
+- Existing activity counts and tiers get migrated to all-time automatically
+  - The migration code is temporary and can be removed after everything has upgraded
+- The same role can't be added to more than one activity tier, including between all-time and monthly
+- Removing or replacing an activity tier removes the old role from everyone before cleaning up the database entry
+  - If a role change fails, it'll send the failure to the configured alert channel
+- Boost setup now uses buttons and modals instead of asking everything one message at a time
+  - One boost gets a custom role with an icon and one emoji
+  - Two boosts also get a custom role color and a second emoji
+  - Finished buttons turn green instead of sending extra ephemeral messages
+- The final boost review DM only shows the role and emoji names, with **Submit for Review** and **Start Over**
+- Boost approval image previews now try to stay stacked vertically
+  - The previews and their attachments are removed once the approval or denial actually goes through
+  - Denials show the reason in the final admin channel message
+- Fixed `/boost status` sending a dead setup panel after a forced request was denied
+- Boost approvals don't remove the buttons or previews until the decision actually goes through now
+  - If Discord says no to a role or emoji change, the request stays up so someone can try it again
+  - This also stops two admins from processing the same request at the same time
+- Rerunning the boost flow for someone who already has perks won't forget about their old role and emojis anymore
+  - The new set gets finished before the old set is removed
+  - If the old stuff can't be deleted, Amadeus keeps track of it and tries again later
+- Boost grants are all-or-nothing now
+  - If the role icon, role assignment, or an emoji fails, it'll clean up anything it already made instead of calling it successful
+  - Failed removals stay in the database instead of leaving mystery roles and emojis behind
+- Before sending the boost setup DM, Amadeus checks that the server has room for the role and every emoji
+  - It also checks that the server can use role icons
+  - If it can't start, it'll tell the admin channel who was affected so someone can reach out to them
+  - It checks everything again at approval time in case the server filled up while they were doing the forms
+- If a boost setup or confirmation DM fails, it'll alert the admin channel and leave the flow in a state `/boost status` can recover
+- Denial reasons are included in the member's DM now, not just the admin channel
+- Enabling the boost module checks that the admin channel can view, send, embed, and attach files
+  - Failed approval posts also try to leave a plain error in the admin channel with the affected user
+- Role icons are limited to Discord's actual 256 KB limit instead of letting a larger upload fail later
+- Boost modal uploads require `discord.py>=2.7,<3`
+- Monthly activity rollover no longer quietly ignores a role that was deleted in Discord
+  - It'll alert the admin channel and keep trying the rollover until the tier is fixed or removed
+  - It'll also fetch a qualifying member if they aren't in the member cache instead of just skipping them
+- Activity tier roles are unique in the database now, not just checked by the command
+- Database upgrades check what is actually missing instead of assuming every SQLite error means "the column already exists"
+- Server data is deleted 90 days after Amadeus leaves the server
+  - If Amadeus rejoins before then, the deletion gets cancelled and the old config is kept
+- Server owners are ignored by every honeypot action
+  - Discord wouldn't let the bot ban the owner anyway, and trying the other actions wasn't useful either
+- Added `/amadeus health`
+  - It checks the database, bot latency, enabled modules, admin role and channel, channel permissions, and any boost cleanup that's still waiting
+
 ### 1.8.2
 - Added "Unpin Message" feature
 

@@ -23,7 +23,9 @@ with `/amadeus module enable <module>` and `/amadeus module disable <module>`.
 - Per-server module enable/disable controls.
 - Configurable admin channel for alerts and approval requests.
 - Configurable admin role for privileged Amadeus actions.
+- `/amadeus health` checks database integrity, configuration, module loading, alert-channel permissions, latency, and pending boost cleanup.
 - SQLite-backed persistent configuration and module state.
+- Guild data is scheduled for deletion 90 days after the bot leaves; rejoining cancels the pending deletion.
 - Docker-friendly deployment with environment-selected cogs.
 
 ---

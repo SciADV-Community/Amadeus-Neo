@@ -32,6 +32,20 @@ class BoostStore(BaseStore):
             )
             """
         )
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS boost_cleanup (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                tier        INTEGER NOT NULL,
+                role_id     INTEGER,
+                emoji_1_id  INTEGER,
+                emoji_2_id  INTEGER,
+                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         self.db.commit()
 
     def get_subscription_count(self, guild_id: int) -> int | None:
@@ -93,3 +107,54 @@ class BoostStore(BaseStore):
             (guild_id, user_id),
         )
         self.db.commit()
+
+    def queue_cleanup(self, grant: BoostGrant) -> int:
+        cursor = self.db.execute(
+            """
+            INSERT INTO boost_cleanup
+                (guild_id, user_id, tier, role_id, emoji_1_id, emoji_2_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                grant.guild_id,
+                grant.user_id,
+                grant.tier,
+                grant.role_id,
+                grant.emoji_1_id,
+                grant.emoji_2_id,
+            ),
+        )
+        self.db.commit()
+        return int(cursor.lastrowid)
+
+    def get_cleanup_jobs(self, guild_id: int | None = None) -> list[tuple[int, BoostGrant]]:
+        if guild_id is None:
+            rows = self.db.execute("SELECT * FROM boost_cleanup ORDER BY id").fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM boost_cleanup WHERE guild_id = ? ORDER BY id", (guild_id,)
+            ).fetchall()
+        return [
+            (
+                row["id"],
+                BoostGrant(
+                    guild_id=row["guild_id"],
+                    user_id=row["user_id"],
+                    tier=row["tier"],
+                    role_id=row["role_id"],
+                    emoji_1_id=row["emoji_1_id"],
+                    emoji_2_id=row["emoji_2_id"],
+                ),
+            )
+            for row in rows
+        ]
+
+    def delete_cleanup_job(self, job_id: int) -> None:
+        self.db.execute("DELETE FROM boost_cleanup WHERE id = ?", (job_id,))
+        self.db.commit()
+
+    def count_cleanup(self, guild_id: int) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) AS count FROM boost_cleanup WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        return int(row["count"])

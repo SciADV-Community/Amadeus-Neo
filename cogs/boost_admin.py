@@ -98,6 +98,7 @@ class BoostAdmin(commands.Cog):
 
         elif flow is not None:
             state_labels = {
+                S.COLLECTING:    "Waiting for role and emoji forms",
                 S.ROLE_NAME:     "Waiting for role name",
                 S.ROLE_IMAGE:    "Waiting for role icon image",
                 S.ROLE_COLOR:    "Waiting for role color",
@@ -137,16 +138,21 @@ class BoostAdmin(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
         # If the user has an active mid-flow, re-send the current step prompt in DMs.
-        if flow is not None and flow.state == S.DENIED and not flow.data.get("forced"):
-            cog = self._boost_cog()
-            if cog is not None:
-                restarted = await cog._reset_flow(
-                    guild.id,
-                    member.id,
-                    flow.data.get("tier", 1),
-                    forced=bool(flow.data.get("forced")),
-                )
-                await cog._send_prompt(interaction.user, restarted)
+        if flow is not None and flow.state == S.DENIED:
+            # Admin-forced requests remain admin-managed after denial. Do not
+            # send their stale DENIED dashboard: its buttons are intentionally
+            # inactive. An admin can start a fresh forced request if needed.
+            if not flow.data.get("forced"):
+                cog = self._boost_cog()
+                if cog is not None:
+                    restarted = await cog._reset_flow(
+                        guild.id,
+                        member.id,
+                        flow.data.get("tier", 1),
+                        forced=False,
+                    )
+                    if restarted is not None:
+                        await cog._send_prompt(interaction.user, restarted)
         elif flow is not None and flow.state not in (S.PENDING, S.PROCESSING, S.CONFIRMATION):
             cog = self._boost_cog()
             if cog is not None:
@@ -196,9 +202,6 @@ class BoostAdmin(commands.Cog):
             await interaction.response.send_message("Boost cog is not loaded.", ephemeral=True)
             return
 
-        # Discard any stale flow so the new one starts cleanly.
-        self.flow_store.delete(interaction.guild.id, member.id, FLOW_TYPE)
-
         current = interaction.guild.premium_subscription_count or 0
         cached = self.boost_store.get_subscription_count(interaction.guild.id)
         tier = count if count is not None else get_proposed_tier(
@@ -206,7 +209,14 @@ class BoostAdmin(commands.Cog):
             current,
         )
 
-        await cog._start_flow(interaction.guild, member, tier, forced=force)
+        started = await cog._start_flow(interaction.guild, member, tier, forced=force)
+        if not started:
+            await interaction.response.send_message(
+                f"Could not start the boost flow for {member.mention}. Details were posted "
+                "to the configured admin channel.",
+                ephemeral=True,
+            )
+            return
         log(
             f"BOOST // ADMIN START 『 USER {member.id} 』 GUILD 『 {interaction.guild.id} 』 "
             f"TIER {tier}{' [FORCED]' if force else ''}{' [COUNT OVERRIDE]' if count is not None else ''}",
@@ -248,11 +258,19 @@ class BoostAdmin(commands.Cog):
             return
 
         cog = self._boost_cog()
-        if cog is not None:
-            await cog._teardown_grant(interaction.guild, grant)
-        else:
-            # Cog not loaded; just delete the DB record — manual cleanup required.
-            self.boost_store.delete_grant(interaction.guild.id, member.id)
+        if cog is None:
+            await interaction.response.send_message(
+                "Boost cog is unavailable. The grant was retained so its resources can be cleaned up safely.",
+                ephemeral=True,
+            )
+            return
+        if not await cog._teardown_grant(interaction.guild, grant):
+            await interaction.response.send_message(
+                f"Could not fully remove {member.mention}'s perks. The grant was retained and "
+                "an alert was posted for administrators.",
+                ephemeral=True,
+            )
+            return
 
         log(
             f"BOOST // ADMIN REMOVE 『 USER {member.id} 』 GUILD 『 {interaction.guild.id} 』",

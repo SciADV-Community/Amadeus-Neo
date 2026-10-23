@@ -1,16 +1,13 @@
 """
 Boost perks cog.
 
-Listens for server boosts and walks the booster through a DM conversation
-to collect custom role and emoji preferences. The completed request is sent
-to the admin alert channel for review.
+Listens for server boosts and sends the booster a DM dashboard. Buttons open
+modals that collect custom role and emoji preferences. The completed request
+is sent to the admin alert channel for review.
 
 Flow states (stored in dm_flow_state.state)
 -------------------------------------------
-ROLE_NAME    → ROLE_IMAGE → (tier 2) ROLE_COLOR
-  → (slots OK) EMOJI_1_NAME → EMOJI_1_IMAGE
-  → (tier 2)   EMOJI_2_NAME → EMOJI_2_IMAGE
-  → CONFIRMATION → PENDING
+COLLECTING → CONFIRMATION → PENDING
 
 Data keys in dm_flow_state.data (JSON)
 ---------------------------------------
@@ -22,9 +19,9 @@ emoji_1_name      str
 emoji_1_b64       str         base64-encoded bytes
 emoji_2_name      str         (tier 2 only)
 emoji_2_b64       str         (tier 2 only)
-emoji_skipped     bool        True if slots were insufficient at collection time
 """
 import base64
+import binascii
 import io
 import re
 import secrets
@@ -34,11 +31,13 @@ import discord
 from discord.ext import commands, tasks
 
 from amadeus.approval import (
+    ApprovalResult,
     add_dynamic_items,
     post_approval_request,
     register_approval_callback,
     unregister_approval_callback,
 )
+from amadeus.alerts import send_alert
 from amadeus.boost_store import BoostStore
 from amadeus.boost_utils import check_emoji_slots, get_proposed_tier, is_active_booster
 from amadeus.database import ConfigStore
@@ -65,10 +64,13 @@ _EMOJI_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{2,32}$")
 _HEX_COLOR_RE = re.compile(r"^#?([0-9A-Fa-f]{6})$")
 # Discord emoji file size limit
 _EMOJI_MAX_BYTES = 256 * 1024  # 256 KB
+_ROLE_ICON_MAX_BYTES = 256 * 1024  # Discord role icon upload limit
 _ROLE_NAME_MAX_LENGTH = 32
-# Small emoji/icon images make Discord render very narrow embeds. Padding the
-# preview asset itself is the only reliable way to force a minimum visual width.
-_PREVIEW_MIN_WIDTH = 220
+_DISCORD_ROLE_LIMIT = 250
+# Discord may arrange narrow preview embeds into a horizontal grid. Give each
+# transparent preview canvas the practical full embed width so role and emoji
+# previews remain stacked in one column on standard clients.
+_PREVIEW_MIN_WIDTH = 520
 
 
 # ============================================================
@@ -76,6 +78,9 @@ _PREVIEW_MIN_WIDTH = 220
 # ============================================================
 
 class S:
+    COLLECTING   = "collecting_perks"
+    # TEMPORARY COMPATIBILITY: legacy step states can be resumed into the new
+    # modal dashboard. Remove these after all pre-modal flows have expired.
     ROLE_NAME    = "awaiting_role_name"
     ROLE_IMAGE   = "awaiting_role_image"
     ROLE_COLOR   = "awaiting_role_color"
@@ -97,6 +102,9 @@ class S:
 
 _CONFIRM_RE = re.compile(r"amadeus_boost:confirm:(?P<guild_id>\d+):(?P<user_id>\d+)")
 _RESTART_RE = re.compile(r"amadeus_boost:restart:(?P<guild_id>\d+):(?P<user_id>\d+)")
+_PERK_RE = re.compile(
+    r"amadeus_boost:perk:(?P<perk>role|emoji1|emoji2):(?P<guild_id>\d+):(?P<user_id>\d+)"
+)
 
 
 class _ConfirmButton(
@@ -159,6 +167,154 @@ class _RestartButton(
             )
             return
         await cog.handle_restart(interaction, self.guild_id, self.user_id)
+
+
+class _PerkButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"amadeus_boost:perk:(?:role|emoji1|emoji2):\d+:\d+",
+):
+    LABELS = {
+        "role": "Custom Role",
+        "emoji1": "Emoji 1",
+        "emoji2": "Emoji 2",
+    }
+
+    def __init__(
+        self,
+        perk: str,
+        guild_id: int,
+        user_id: int,
+        *,
+        completed: bool = False,
+    ) -> None:
+        label = self.LABELS[perk]
+        if completed:
+            label = f"✓ {label}"
+        super().__init__(
+            discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.success if completed else discord.ButtonStyle.primary,
+                custom_id=f"amadeus_boost:perk:{perk}:{guild_id}:{user_id}",
+            )
+        )
+        self.perk = perk
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        matched = _PERK_RE.fullmatch(item.custom_id)
+        return cls(
+            matched.group("perk"),
+            int(matched.group("guild_id")),
+            int(matched.group("user_id")),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog: Boost | None = interaction.client.get_cog("Boost")
+        if cog is None:
+            await interaction.response.send_message(
+                "The boost module is currently unavailable. Please try again later.",
+                ephemeral=True,
+            )
+            return
+        await cog.handle_perk_button(
+            interaction,
+            self.guild_id,
+            self.user_id,
+            self.perk,
+        )
+
+
+class _RoleModal(discord.ui.Modal):
+    def __init__(self, cog: "Boost", flow: DmFlow) -> None:
+        super().__init__(title="Set Up Your Custom Role", timeout=15 * 60)
+        self.cog = cog
+        self.guild_id = flow.guild_id
+        self.user_id = flow.user_id
+        self.tier = int(flow.data.get("tier", 1))
+
+        self.role_name = discord.ui.TextInput(
+            custom_id="role_name",
+            placeholder="Name Subject to Change",
+            default=flow.data.get("role_name"),
+            max_length=_ROLE_NAME_MAX_LENGTH,
+        )
+        self.role_icon = discord.ui.FileUpload(
+            custom_id="role_icon",
+            required=True,
+            min_values=1,
+            max_values=1,
+        )
+
+        self.add_item(discord.ui.TextDisplay("Please enter your custom role details below."))
+        self.add_item(discord.ui.Label(text="Custom Role", component=self.role_name))
+        if self.tier == 2:
+            self.role_color = discord.ui.TextInput(
+                custom_id="role_color",
+                placeholder="FFFFFF",
+                default=str(flow.data.get("role_color_hex", "")).lstrip("#") or None,
+                min_length=6,
+                max_length=6,
+            )
+            self.add_item(discord.ui.Label(text="Custom Role Color", component=self.role_color))
+        else:
+            self.role_color = None
+        self.add_item(
+            discord.ui.Label(
+                text="Role Icon",
+                description="PNG, JPEG, or WebP; max 256 KB; square 64×64 recommended.",
+                component=self.role_icon,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_role_modal(interaction, self)
+
+
+class _EmojiModal(discord.ui.Modal):
+    def __init__(self, cog: "Boost", flow: DmFlow, index: int) -> None:
+        super().__init__(title=f"Set Up Emoji {index}", timeout=15 * 60)
+        self.cog = cog
+        self.guild_id = flow.guild_id
+        self.user_id = flow.user_id
+        self.index = index
+        prefix = f"emoji_{index}"
+
+        self.emoji_name = discord.ui.TextInput(
+            custom_id=f"{prefix}_name",
+            placeholder="my_emoji",
+            default=flow.data.get(f"{prefix}_name"),
+            min_length=2,
+            max_length=32,
+        )
+        self.emoji_image = discord.ui.FileUpload(
+            custom_id=f"{prefix}_image",
+            required=True,
+            min_values=1,
+            max_values=1,
+        )
+
+        self.add_item(
+            discord.ui.TextDisplay(f"What would you like your custom emoji {index} to be named?")
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=f"Emoji {index} Name",
+                description="2–32 letters, numbers, or underscores.",
+                component=self.emoji_name,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=f"Emoji {index} Image",
+                description="PNG, JPEG, GIF, or WebP; maximum 256 KB.",
+                component=self.emoji_image,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.handle_emoji_modal(interaction, self)
 
 
 # ============================================================
@@ -253,15 +409,16 @@ class Boost(commands.Cog):
         if grant is None:
             return
 
-        await self._teardown_grant(guild, grant)
+        removed = await self._teardown_grant(guild, grant)
 
-        await safe_dm(
-            member,
-            content=(
-                f"Your boost perks from **{guild.name}** have been removed since you're no longer boosting. "
-                "Thank you for your support! Boost again any time to reclaim your perks."
-            ),
-        )
+        if removed:
+            await safe_dm(
+                member,
+                content=(
+                    f"Your boost perks from **{guild.name}** have been removed since you're no longer boosting. "
+                    "Thank you for your support! Boost again any time to reclaim your perks."
+                ),
+            )
 
     # ========================================================
     # Flow lifecycle
@@ -269,8 +426,19 @@ class Boost(commands.Cog):
 
     async def _start_flow(
         self, guild: discord.Guild, member: discord.Member, tier: int, forced: bool = False
-    ) -> None:
-        """Creates a fresh flow and sends the welcome DM + first prompt."""
+    ) -> bool:
+        """Creates a fresh flow and sends the modal setup dashboard."""
+        capacity_error = self._boost_capacity_error(guild, tier)
+        if capacity_error is not None:
+            await send_alert(
+                self.bot,
+                self.module_store,
+                guild.id,
+                f"⚠ **Boost setup could not start for <@{member.id}>** (`{member.id}`). "
+                f"{capacity_error} An admin will need to free capacity and contact the member manually.",
+            )
+            return False
+
         data: dict = {"tier": tier}
         if forced:
             data["forced"] = True
@@ -279,26 +447,52 @@ class Boost(commands.Cog):
             guild_id=guild.id,
             user_id=member.id,
             flow_type=FLOW_TYPE,
-            state=S.ROLE_NAME,
+            state=S.COLLECTING,
             data=data,
         )
+        self._set_emoji_availability(flow)
         self.flow_store.save(flow)
+        sent = await self._send_prompt(member, flow)
+        if not sent:
+            await send_alert(
+                self.bot,
+                self.module_store,
+                guild.id,
+                f"⚠ **Boost setup DM failed for <@{member.id}>** (`{member.id}`). "
+                "The flow was saved, but an admin must contact the member and ask them to run `/boost status`.",
+            )
+        return sent
 
-        welcome = discord.Embed(
-            title=f"🎉 Thanks for boosting {guild.name}!",
-            description=(
-                f"You've added **{tier} boost{'s' if tier > 1 else ''}** and unlocked:\n\n"
-                f"{self._tier_perks_text(tier)}\n"
-                "I'll guide you through setting them up now. Type `restart` to start over, or `cancel` to stop. "
-                f"You can also use `/boost status` in **{guild.name}** to come back later."
-            ),
-            color=discord.Color.from_rgb(255, 115, 250),
-        )
-        await safe_dm(member, embed=welcome)
-        await self._send_prompt(member, flow)
+    @staticmethod
+    def _boost_capacity_error(guild: discord.Guild, tier: int) -> str | None:
+        if len(guild.roles) >= _DISCORD_ROLE_LIMIT:
+            return f"The server has reached Discord's {_DISCORD_ROLE_LIMIT}-role limit."
+        sufficient, available, capacity = check_emoji_slots(guild, tier)
+        if not sufficient:
+            return (
+                f"The server needs {tier} free emoji slot(s), but only has "
+                f"{available} of {capacity} available."
+            )
+        if guild.premium_tier < 2:
+            return "The server is not eligible to apply custom role icons (Boost Level 2 is required)."
+        return None
 
-    async def _reset_flow(self, guild_id: int, user_id: int, tier: int, forced: bool = False) -> DmFlow:
+    async def _reset_flow(
+        self, guild_id: int, user_id: int, tier: int, forced: bool = False
+    ) -> DmFlow | None:
         """Resets the flow to the first step, preserving the tier."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None:
+            capacity_error = self._boost_capacity_error(guild, tier)
+            if capacity_error is not None:
+                await send_alert(
+                    self.bot,
+                    self.module_store,
+                    guild_id,
+                    f"⚠ **Boost setup could not restart for <@{user_id}>** (`{user_id}`). "
+                    f"{capacity_error} An admin must contact the member manually.",
+                )
+                return None
         data: dict = {"tier": tier}
         if forced:
             data["forced"] = True
@@ -307,11 +501,285 @@ class Boost(commands.Cog):
             guild_id=guild_id,
             user_id=user_id,
             flow_type=FLOW_TYPE,
-            state=S.ROLE_NAME,
+            state=S.COLLECTING,
             data=data,
         )
+        self._set_emoji_availability(flow)
         self.flow_store.save(flow)
         return flow
+
+    def _set_emoji_availability(self, flow: DmFlow) -> None:
+        """Clear the legacy emoji-skip state; new flows require every perk."""
+        flow.data.pop("emoji_skipped", None)
+        flow.data.pop("emoji_slots_available", None)
+        flow.data.pop("emoji_slots_capacity", None)
+
+    @staticmethod
+    def _role_complete(flow: DmFlow) -> bool:
+        data = flow.data
+        required = ("role_name", "role_image_b64")
+        if int(data.get("tier", 1)) == 2:
+            required += ("role_color_hex",)
+        return all(data.get(key) for key in required)
+
+    @staticmethod
+    def _emoji_complete(flow: DmFlow, index: int) -> bool:
+        return bool(
+            flow.data.get(f"emoji_{index}_name")
+            and flow.data.get(f"emoji_{index}_b64")
+        )
+
+    @classmethod
+    def _collection_complete(cls, flow: DmFlow) -> bool:
+        if not cls._role_complete(flow):
+            return False
+        tier = int(flow.data.get("tier", 1))
+        return all(cls._emoji_complete(flow, index) for index in range(1, tier + 1))
+
+    def _build_setup_embed(self, flow: DmFlow) -> discord.Embed:
+        guild = self.bot.get_guild(flow.guild_id)
+        guild_name = guild.name if guild else f"Server {flow.guild_id}"
+        tier = int(flow.data.get("tier", 1))
+        embed = discord.Embed(
+            title=f"🎉 Thanks for boosting {guild_name}!",
+            description=(
+                f"You've added **{tier} boost{'s' if tier > 1 else ''}** and unlocked:\n\n"
+                f"{self._tier_perks_text(tier)}\n"
+                "Use each button below to enter the corresponding details. "
+                "You can return and edit an item until the request is submitted."
+            ),
+            color=self._flow_accent_color(flow, discord.Color.from_rgb(255, 115, 250)),
+        )
+
+        statuses = [
+            f"{'✅' if self._role_complete(flow) else '⬜'} Custom role",
+        ]
+        for index in range(1, tier + 1):
+            statuses.append(
+                f"{'✅' if self._emoji_complete(flow, index) else '⬜'} Emoji {index}"
+            )
+        embed.add_field(name="Setup Progress", value="\n".join(statuses), inline=False)
+        embed.set_footer(
+            text="Type 'restart' to clear your choices or 'cancel' to stop. "
+            f"You can also use /boost status in {guild_name}."
+        )
+        return embed
+
+    def _build_setup_view(self, flow: DmFlow) -> discord.ui.View:
+        tier = int(flow.data.get("tier", 1))
+        view = discord.ui.View(timeout=None)
+        view.add_item(
+            _PerkButton(
+                "role",
+                flow.guild_id,
+                flow.user_id,
+                completed=self._role_complete(flow),
+            )
+        )
+        for index in range(1, tier + 1):
+            view.add_item(
+                _PerkButton(
+                    f"emoji{index}",
+                    flow.guild_id,
+                    flow.user_id,
+                    completed=self._emoji_complete(flow, index),
+                )
+            )
+        return view
+
+    async def handle_perk_button(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        user_id: int,
+        perk: str,
+    ) -> None:
+        if interaction.user.id != user_id:
+            await interaction.response.send_message("This button isn't for you.", ephemeral=True)
+            return
+
+        flow = self.flow_store.get(guild_id, user_id, FLOW_TYPE)
+        if flow is None or flow.state != S.COLLECTING:
+            await interaction.response.send_message(
+                "This setup panel is no longer active. Use `/boost status` in the server to resume.",
+                ephemeral=True,
+            )
+            return
+
+        tier = int(flow.data.get("tier", 1))
+        if perk == "role":
+            await interaction.response.send_modal(_RoleModal(self, flow))
+            return
+        if perk == "emoji1":
+            await interaction.response.send_modal(_EmojiModal(self, flow, 1))
+            return
+        if perk == "emoji2" and tier == 2:
+            await interaction.response.send_modal(_EmojiModal(self, flow, 2))
+            return
+        await interaction.response.send_message("That perk is not available for this request.", ephemeral=True)
+
+    async def handle_role_modal(
+        self,
+        interaction: discord.Interaction,
+        modal: _RoleModal,
+    ) -> None:
+        if interaction.user.id != modal.user_id:
+            await interaction.response.send_message("This modal isn't for you.", ephemeral=True)
+            return
+
+        role_name = modal.role_name.value.strip()
+        if not role_name:
+            await interaction.response.send_message("Enter a name for the custom role.", ephemeral=True)
+            return
+        role_name_error = validate_safe_role_name(role_name)
+        if role_name_error is not None:
+            await interaction.response.send_message(role_name_error, ephemeral=True)
+            return
+
+        role_color_hex = None
+        if modal.role_color is not None:
+            match = _HEX_COLOR_RE.fullmatch(modal.role_color.value.strip())
+            if match is None:
+                await interaction.response.send_message(
+                    "Enter a six-character hex color such as `FF5733`.",
+                    ephemeral=True,
+                )
+                return
+            role_color_hex = f"#{match.group(1).upper()}"
+
+        attachment = modal.role_icon.values[0] if modal.role_icon.values else None
+        if attachment is None:
+            await interaction.response.send_message("Upload an image for the role icon.", ephemeral=True)
+            return
+        validation_error = validate_discord_attachment_image(attachment, ROLE_ICON_EXTENSIONS)
+        if validation_error is not None:
+            await interaction.response.send_message(validation_error, ephemeral=True)
+            return
+        if attachment.size > _ROLE_ICON_MAX_BYTES:
+            await interaction.response.send_message("Role icons must be 256 KB or smaller.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        image = await self._read_modal_attachment(interaction, attachment)
+        if image is None:
+            return
+        if len(image) > _ROLE_ICON_MAX_BYTES:
+            await interaction.followup.send("Role icons must be 256 KB or smaller.", ephemeral=True)
+            return
+
+        flow = self.flow_store.get(modal.guild_id, modal.user_id, FLOW_TYPE)
+        if flow is None or flow.state != S.COLLECTING:
+            await interaction.followup.send("This setup is no longer active.", ephemeral=True)
+            return
+        flow.data["role_name"] = role_name
+        flow.data["role_image_b64"] = base64.b64encode(image).decode()
+        flow.data["role_image_ext"] = image_extension_from_url(attachment.url) or ".png"
+        if role_color_hex is not None:
+            flow.data["role_color_hex"] = role_color_hex
+        await self._finish_modal_submission(interaction, flow)
+
+    async def handle_emoji_modal(
+        self,
+        interaction: discord.Interaction,
+        modal: _EmojiModal,
+    ) -> None:
+        if interaction.user.id != modal.user_id:
+            await interaction.response.send_message("This modal isn't for you.", ephemeral=True)
+            return
+
+        emoji_name = modal.emoji_name.value.strip()
+        if not _EMOJI_NAME_RE.fullmatch(emoji_name):
+            await interaction.response.send_message(
+                "Emoji names must be 2–32 characters using only letters, numbers, and underscores.",
+                ephemeral=True,
+            )
+            return
+
+        attachment = modal.emoji_image.values[0] if modal.emoji_image.values else None
+        if attachment is None:
+            await interaction.response.send_message("Upload an image for the emoji.", ephemeral=True)
+            return
+        validation_error = validate_discord_attachment_image(attachment, EMOJI_IMAGE_EXTENSIONS)
+        if validation_error is not None:
+            await interaction.response.send_message(validation_error, ephemeral=True)
+            return
+        if attachment.size > _EMOJI_MAX_BYTES:
+            await interaction.response.send_message(
+                f"Emoji images must be {_EMOJI_MAX_BYTES // 1024} KB or smaller.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+        image = await self._read_modal_attachment(interaction, attachment)
+        if image is None:
+            return
+        if len(image) > _EMOJI_MAX_BYTES:
+            await interaction.followup.send(
+                f"Emoji images must be {_EMOJI_MAX_BYTES // 1024} KB or smaller.",
+                ephemeral=True,
+            )
+            return
+
+        flow = self.flow_store.get(modal.guild_id, modal.user_id, FLOW_TYPE)
+        if flow is None or flow.state != S.COLLECTING:
+            await interaction.followup.send("This setup is no longer active.", ephemeral=True)
+            return
+        tier = int(flow.data.get("tier", 1))
+        if modal.index > tier:
+            await interaction.followup.send("That emoji perk is no longer available.", ephemeral=True)
+            return
+        prefix = f"emoji_{modal.index}"
+        flow.data[f"{prefix}_name"] = emoji_name
+        flow.data[f"{prefix}_b64"] = base64.b64encode(image).decode()
+        flow.data[f"{prefix}_ext"] = image_extension_from_url(attachment.url) or ".png"
+        await self._finish_modal_submission(interaction, flow)
+
+    async def _read_modal_attachment(
+        self,
+        interaction: discord.Interaction,
+        attachment: discord.Attachment,
+    ) -> bytes | None:
+        try:
+            return await attachment.read()
+        except discord.HTTPException as error:
+            log(
+                f"BOOST // MODAL FILE DOWNLOAD FAILED 『 USER {interaction.user.id} 』 // {error}",
+                level="warning",
+                logger_name="boost",
+            )
+            await interaction.followup.send(
+                "I couldn't download that file. Please reopen the modal and try again.",
+                ephemeral=True,
+            )
+            return None
+
+    async def _finish_modal_submission(
+        self,
+        interaction: discord.Interaction,
+        flow: DmFlow,
+    ) -> None:
+        self.flow_store.save(flow)
+        try:
+            await interaction.edit_original_response(
+                embed=self._build_setup_embed(flow),
+                view=self._build_setup_view(flow),
+            )
+        except discord.HTTPException as error:
+            log(
+                f"BOOST // SETUP DASHBOARD UPDATE FAILED 『 USER {flow.user_id} 』 // {error}",
+                level="warning",
+                logger_name="boost",
+            )
+            await interaction.followup.send(
+                "I saved your selection, but couldn't update the setup dashboard. "
+                "Use `/boost status` in the server to refresh it.",
+                ephemeral=True,
+            )
+            return
+        complete = self._collection_complete(flow)
+        if complete:
+            await self._send_confirmation(interaction.user, flow)
 
     # ========================================================
     # DM routing
@@ -363,6 +831,12 @@ class Boost(commands.Cog):
                 return
 
             flow = await self._reset_flow(flow.guild_id, flow.user_id, tier, forced=forced)
+            if flow is None:
+                await safe_dm(
+                    message.author,
+                    content="The setup cannot restart because the server does not currently have capacity for every perk. The admins have been alerted.",
+                )
+                return
             await safe_dm(
                 message.author,
                 content=(
@@ -385,6 +859,7 @@ class Boost(commands.Cog):
         flow = active[0]
 
         handlers = {
+            S.COLLECTING:    self._step_use_dashboard,
             S.ROLE_NAME:     self._step_role_name,
             S.ROLE_IMAGE:    self._step_role_image,
             S.ROLE_COLOR:    self._step_role_color,
@@ -441,6 +916,12 @@ class Boost(commands.Cog):
     # Step handlers
     # ========================================================
 
+    async def _step_use_dashboard(self, flow: DmFlow, message: discord.Message) -> None:
+        await safe_dm(
+            message.author,
+            content="Use the buttons in your boost setup dashboard to enter your role and emoji details.",
+        )
+
     async def _step_role_name(self, flow: DmFlow, message: discord.Message) -> None:
         name = message.content.strip()
         if not name:
@@ -473,7 +954,9 @@ class Boost(commands.Cog):
             await safe_dm(message.author, content=validation_error)
             return
 
-        data = await self._download_attachment(message.author, attachment, max_size=4 * 1024 * 1024)
+        data = await self._download_attachment(
+            message.author, attachment, max_size=_ROLE_ICON_MAX_BYTES
+        )
         if data is None:
             return
 
@@ -502,33 +985,7 @@ class Boost(commands.Cog):
         await self._advance_past_role(flow, message.author)
 
     async def _advance_past_role(self, flow: DmFlow, user: discord.User) -> None:
-        """
-        After role details are collected, decide whether to collect emojis.
-
-        Checks available emoji slots for the guild. If there aren't enough,
-        skips emoji steps and goes straight to the confirmation summary.
-        """
-        tier = flow.data.get("tier", 1)
-        needed = tier  # 1 slot for tier 1, 2 for tier 2
-        guild = self.bot.get_guild(flow.guild_id)
-
-        if guild is not None:
-            sufficient, available, capacity = check_emoji_slots(guild, needed)
-            if not sufficient:
-                flow.data["emoji_skipped"] = True
-                self.flow_store.save(flow)
-                await safe_dm(
-                    user,
-                    content=(
-                        f"⚠ There are currently only **{available}/{capacity}** emoji slots available, "
-                        f"which isn't enough for your perk{'s' if needed > 1 else ''}. "
-                        "The emoji step will be skipped — you can use `/boost status` later to add them "
-                        "once the server has more free slots."
-                    ),
-                )
-                await self._send_confirmation(user, flow)
-                return
-        # Enough slots (or guild not cached — proceed and let admin verify)
+        """Continue legacy flows into emoji collection; every perk is required."""
         flow.state = S.EMOJI_1_NAME
         self.flow_store.save(flow)
         await self._send_prompt(user, flow)
@@ -611,33 +1068,49 @@ class Boost(commands.Cog):
     # Confirmation
     # ========================================================
 
-    async def _send_confirmation(self, user: discord.User, flow: DmFlow) -> None:
-        flow.state = S.CONFIRMATION
-        self.flow_store.save(flow)
-
-        guild = self.bot.get_guild(flow.guild_id)
-        guild_name = guild.name if guild else f"Server {flow.guild_id}"
+    def _build_confirmation_embed(self, flow: DmFlow, guild_name: str) -> discord.Embed:
         data = flow.data
-        tier = data.get("tier", 1)
+        tier = int(data.get("tier", 1))
+        selections = [
+            f"**Custom Role:** {escape_untrusted_text(str(data.get('role_name', 'Not provided')))}"
+        ]
+        for index in range(1, tier + 1):
+            name = escape_untrusted_text(str(data.get(f"emoji_{index}_name", "Not provided")))
+            selections.append(f"**Emoji {index}:** {name}")
 
         embed = discord.Embed(
             title="Review Your Request",
             description=(
-                f"Here's everything you've set up for **{guild_name}**.\n"
-                "Click **Submit for Review** to send it to the admins, "
+                f"**Server:** {escape_untrusted_text(guild_name)}\n\n"
+                + "\n".join(selections)
+                + "\n\nClick **Submit for Review** to send this request to the admins, "
                 "or **Start Over** to redo your choices."
             ),
             color=self._flow_accent_color(flow, discord.Color.orange()),
         )
-        embed.add_field(name="Tier", value=str(tier), inline=False)
-        embed.add_field(name="Tier Includes", value=self._tier_perks_text(tier), inline=False)
+        return embed
+
+    async def _send_confirmation(self, user: discord.User, flow: DmFlow) -> None:
+        guild = self.bot.get_guild(flow.guild_id)
+        guild_name = guild.name if guild else f"Server {flow.guild_id}"
+        embed = self._build_confirmation_embed(flow, guild_name)
 
         view = discord.ui.View(timeout=None)
         view.add_item(_ConfirmButton(flow.guild_id, flow.user_id))
         view.add_item(_RestartButton(flow.guild_id, flow.user_id))
 
-        embeds, files = self._build_preview_payload(flow, embed)
-        await safe_dm(user, embeds=embeds, files=files, view=view)
+        if await safe_dm(user, embed=embed, view=view):
+            flow.state = S.CONFIRMATION
+            self.flow_store.save(flow)
+            return
+
+        await send_alert(
+            self.bot,
+            self.module_store,
+            flow.guild_id,
+            f"⚠ **Boost confirmation DM failed for <@{flow.user_id}>** (`{flow.user_id}`). "
+            "Their request remains resumable with `/boost status`.",
+        )
 
     async def handle_confirm(
         self,
@@ -730,6 +1203,13 @@ class Boost(commands.Cog):
         forced = bool(flow.data.get("forced")) if flow else False
         flow = await self._reset_flow(guild_id, user_id, tier, forced=forced)
 
+        if flow is None:
+            await interaction.response.send_message(
+                "The setup cannot restart because the server does not currently have capacity for every perk. The admins have been alerted.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message("Starting over!", ephemeral=True)
         await self._send_prompt(interaction.user, flow)
 
@@ -747,19 +1227,16 @@ class Boost(commands.Cog):
         request_id: str,
         approved: bool,
         comment: str | None,
-    ) -> None:
+    ) -> ApprovalResult:
         flow = self.flow_store.get(guild_id, user_id, FLOW_TYPE)
         if flow is None:
-            await interaction.followup.send("Flow not found — the user may have cancelled.", ephemeral=True)
-            return
+            return ApprovalResult(False, "Flow not found — the user may have cancelled.")
 
         if flow.state != S.PENDING:
-            await interaction.followup.send("This request has already been processed or is not pending.", ephemeral=True)
-            return
+            return ApprovalResult(False, "This request has already been processed or is not pending.")
 
         if flow.data.get("approval_request_id") != request_id:
-            await interaction.followup.send("This approval button is stale. Use the latest approval request.", ephemeral=True)
-            return
+            return ApprovalResult(False, "This approval button is stale. Use the latest approval request.")
 
         # Claim synchronously before the first await so concurrent modal submits
         # cannot both create roles/emojis for the same pending request.
@@ -786,55 +1263,89 @@ class Boost(commands.Cog):
 
             if user is not None:
                 msg = f"Your boost perks request for {guild_name} was not approved."
+                if comment:
+                    msg += f"\n\n**Reason:** {escape_untrusted_text(comment)}"
                 msg += (
                     "\n\nPlease type 'boost' if you would like to start again. "
                     f"Alternatively, use `/boost status` in {guild_name} if you want to start again at a later time."
                 )
                 await safe_dm(user, content=msg)
 
-            await interaction.followup.send("Decision recorded. The user can type `boost` to start again.", ephemeral=True)
-            return
+            return ApprovalResult(True, "Decision recorded. The user can type `boost` to start again.")
 
         # ---- Approved ----
         if guild is None:
-            await interaction.followup.send("Guild not found.", ephemeral=True)
             flow.state = S.PENDING
             self.flow_store.save(flow)
-            return
+            return ApprovalResult(False, "Guild not found.")
 
         try:
             member = await guild.fetch_member(user_id)
         except (discord.NotFound, discord.HTTPException):
-            await interaction.followup.send("Member is no longer in the server.", ephemeral=True)
-            self.flow_store.delete(guild_id, user_id, FLOW_TYPE)
-            return
+            flow.state = S.PENDING
+            self.flow_store.save(flow)
+            return ApprovalResult(False, "Member is no longer in the server. The request was left pending for review.")
 
         if not flow.data.get("forced") and not is_active_booster(member):
-            await interaction.followup.send("Member is no longer boosting — perks not applied.", ephemeral=True)
-            self.flow_store.delete(guild_id, user_id, FLOW_TYPE)
-            return
+            flow.state = S.PENDING
+            self.flow_store.save(flow)
+            return ApprovalResult(False, "Member is no longer boosting — perks were not applied.")
+
+        capacity_error = self._boost_capacity_error(guild, int(flow.data.get("tier", 1)))
+        if capacity_error is not None:
+            flow.state = S.PENDING
+            self.flow_store.save(flow)
+            await send_alert(
+                self.bot,
+                self.module_store,
+                guild_id,
+                f"⚠ **Boost approval failed for <@{user_id}>** (`{user_id}`). {capacity_error}",
+            )
+            return ApprovalResult(False, f"Grant application cannot continue: {capacity_error}")
 
         grant = await self._apply_grant(guild, member, flow)
 
         if grant is None:
-            await interaction.followup.send(
-                "Grant application failed. Check bot permissions and try again via `/amadeus boost start`.",
-                ephemeral=True,
+            await send_alert(
+                self.bot,
+                self.module_store,
+                guild_id,
+                f"⚠ **Boost approval failed for <@{user_id}>** (`{user_id}`). "
+                "Discord rejected role or emoji creation. Check permissions, hierarchy, and capacity.",
             )
             flow.state = S.PENDING
             self.flow_store.save(flow)
-            return
+            return ApprovalResult(
+                False,
+                "Grant application failed. The request remains pending; check permissions and try again.",
+            )
 
+        previous_grant = self.boost_store.get_grant(guild_id, user_id)
+        cleanup_job_id = (
+            self.boost_store.queue_cleanup(previous_grant) if previous_grant is not None else None
+        )
         self.boost_store.save_grant(grant)
         self.flow_store.delete(guild_id, user_id, FLOW_TYPE)
+
+        if previous_grant is not None and cleanup_job_id is not None:
+            if await self._delete_grant_resources(guild, previous_grant):
+                self.boost_store.delete_cleanup_job(cleanup_job_id)
+            else:
+                await send_alert(
+                    self.bot,
+                    self.module_store,
+                    guild_id,
+                    f"⚠ New boost perks were applied for <@{user_id}>, but one or more old "
+                    "resources could not be removed. Cleanup will retry automatically.",
+                )
 
         if user is not None:
             msg = f"✅ Your boost perks for **{guild_name}** have been applied!"
             if comment:
-                msg += f"\n\n**Admin note:** {comment}"
+                msg += f"\n\n**Admin note:** {escape_untrusted_text(comment)}"
             await safe_dm(user, content=msg)
 
-        await interaction.followup.send("Grant applied successfully!", ephemeral=True)
+        return ApprovalResult(True, "Grant applied successfully!")
 
     # ========================================================
     # Grant application
@@ -850,11 +1361,18 @@ class Boost(commands.Cog):
         Creates the custom role, applies its icon and color, uploads emojis,
         and assigns the role to the member.
 
-        Returns a populated BoostGrant on success, None if role creation fails.
-        Role icon and emoji failures are non-fatal and are logged.
+        Returns a populated BoostGrant only after every requested resource is
+        created and the role is assigned. Any partial work is rolled back.
         """
         data = flow.data
         tier = data.get("tier", 1)
+        if not self._collection_complete(flow):
+            log(
+                f"BOOST // INCOMPLETE FLOW REJECTED 『 USER {member.id} 』 GUILD 『 {guild.id} 』",
+                level="warning",
+                logger_name="boost",
+            )
+            return None
         grant = BoostGrant(guild_id=guild.id, user_id=member.id, tier=tier)
 
         # -- Create role --
@@ -882,29 +1400,44 @@ class Boost(commands.Cog):
         if "role_image_b64" in data and guild.premium_tier >= 2:
             try:
                 await role.edit(
-                    icon=base64.b64decode(data["role_image_b64"]),
+                    icon=base64.b64decode(data["role_image_b64"], validate=True),
                     reason="Boost perk role icon",
                 )
                 log(f"BOOST // ROLE ICON SET 『 {role.id} 』", level="debug", logger_name="boost")
-            except (discord.Forbidden, discord.HTTPException) as e:
-                log(f"BOOST // ROLE ICON FAILED 『 {e} 』 — continuing without icon", level="debug", logger_name="boost")
+            except (discord.Forbidden, discord.HTTPException, ValueError, binascii.Error) as e:
+                log(f"BOOST // ROLE ICON FAILED 『 {e} 』", level="debug", logger_name="boost")
+                await self._rollback_uncommitted_grant(guild, grant)
+                return None
+        elif "role_image_b64" in data:
+            # This is normally caught by preflight, but keep application atomic
+            # if the guild loses eligibility between approval and creation.
+            await self._rollback_uncommitted_grant(guild, grant)
+            return None
 
         # -- Assign role --
         try:
             await member.add_roles(role, reason="Boost perk role assignment")
-        except (discord.Forbidden, discord.HTTPException) as e:
+        except (discord.Forbidden, discord.HTTPException, ValueError, binascii.Error) as e:
             log(f"BOOST // ROLE ASSIGN FAILED 『 {e} 』 GUILD 『 {guild.id} 』", level="debug", logger_name="boost")
+            await self._rollback_uncommitted_grant(guild, grant)
+            return None
 
         # -- Add emojis --
         if "emoji_1_b64" in data and "emoji_1_name" in data:
             emoji = await self._create_emoji(guild, data["emoji_1_name"], data["emoji_1_b64"])
             if emoji:
                 grant.emoji_1_id = emoji.id
+            else:
+                await self._rollback_uncommitted_grant(guild, grant)
+                return None
 
         if tier == 2 and "emoji_2_b64" in data and "emoji_2_name" in data:
             emoji = await self._create_emoji(guild, data["emoji_2_name"], data["emoji_2_b64"])
             if emoji:
                 grant.emoji_2_id = emoji.id
+            else:
+                await self._rollback_uncommitted_grant(guild, grant)
+                return None
 
         return grant
 
@@ -917,12 +1450,12 @@ class Boost(commands.Cog):
         try:
             emoji = await guild.create_custom_emoji(
                 name=name,
-                image=base64.b64decode(image_b64),
+                image=base64.b64decode(image_b64, validate=True),
                 reason="Boost perk emoji",
             )
             log(f"BOOST // EMOJI CREATED :{name}: GUILD 『 {guild.id} 』", level="debug", logger_name="boost")
             return emoji
-        except (discord.Forbidden, discord.HTTPException) as e:
+        except (discord.Forbidden, discord.HTTPException, ValueError, binascii.Error) as e:
             log(f"BOOST // EMOJI FAILED :{name}: GUILD 『 {guild.id} 』 // {e}", level="debug", logger_name="boost")
             return None
 
@@ -930,8 +1463,9 @@ class Boost(commands.Cog):
     # Grant teardown
     # ========================================================
 
-    async def _teardown_grant(self, guild: discord.Guild, grant: BoostGrant) -> None:
-        """Removes the custom role and emojis associated with a boost grant."""
+    async def _delete_grant_resources(self, guild: discord.Guild, grant: BoostGrant) -> bool:
+        """Best-effort resource deletion; returns whether every resource is gone."""
+        succeeded = True
         if grant.role_id is not None:
             role = guild.get_role(grant.role_id)
             if role is not None:
@@ -940,6 +1474,7 @@ class Boost(commands.Cog):
                     log(f"BOOST // ROLE DELETED 『 {grant.role_id} 』 GUILD 『 {guild.id} 』", level="debug", logger_name="boost")
                 except (discord.Forbidden, discord.HTTPException) as e:
                     log(f"BOOST // ROLE DELETE FAILED 『 {e} 』", level="debug", logger_name="boost")
+                    succeeded = False
 
         for emoji_id in (grant.emoji_1_id, grant.emoji_2_id):
             if emoji_id is None:
@@ -951,8 +1486,37 @@ class Boost(commands.Cog):
                     log(f"BOOST // EMOJI DELETED 『 {emoji_id} 』 GUILD 『 {guild.id} 』", level="debug", logger_name="boost")
                 except (discord.Forbidden, discord.HTTPException) as e:
                     log(f"BOOST // EMOJI DELETE FAILED 『 {e} 』", level="debug", logger_name="boost")
+                    succeeded = False
 
+        return succeeded
+
+    async def _rollback_uncommitted_grant(
+        self, guild: discord.Guild, grant: BoostGrant
+    ) -> None:
+        if await self._delete_grant_resources(guild, grant):
+            return
+        self.boost_store.queue_cleanup(grant)
+        await send_alert(
+            self.bot,
+            self.module_store,
+            guild.id,
+            f"⚠ **Boost rollback was incomplete for <@{grant.user_id}>** (`{grant.user_id}`). "
+            "The remaining resources were queued for automatic cleanup.",
+        )
+
+    async def _teardown_grant(self, guild: discord.Guild, grant: BoostGrant) -> bool:
+        """Remove a grant, retaining its database record when cleanup fails."""
+        if not await self._delete_grant_resources(guild, grant):
+            await send_alert(
+                self.bot,
+                self.module_store,
+                guild.id,
+                f"⚠ **Boost cleanup failed for <@{grant.user_id}>** (`{grant.user_id}`). "
+                "The grant remains recorded so cleanup can be retried.",
+            )
+            return False
         self.boost_store.delete_grant(guild.id, grant.user_id)
+        return True
 
     # ========================================================
     # Review preview attachments
@@ -1147,13 +1711,6 @@ class Boost(commands.Cog):
         )
         embed.add_field(name="Member", value=f"<@{flow.user_id}> (`{flow.user_id}`)", inline=False)
 
-        if guild and guild.premium_tier < 2 and "role_image_b64" in data:
-            embed.add_field(
-                name="⚠ Role Icon",
-                value="Role icons require Guild Boost Level 2. The image was saved and will be applied if the server reaches that level.",
-                inline=False,
-            )
-
         embed.set_footer(text=f"Guild ID: {flow.guild_id} | User ID: {flow.user_id}")
         return embed
 
@@ -1164,15 +1721,10 @@ class Boost(commands.Cog):
     def _build_prompt_embed(self, flow: DmFlow) -> discord.Embed:
         """Returns the embed appropriate for the flow's current state."""
         tier = flow.data.get("tier", 1)
-        emoji_skipped = flow.data.get("emoji_skipped", False)
-
         # Compute step X/Y for the title.
         order_t1 = [S.ROLE_NAME, S.ROLE_IMAGE, S.EMOJI_1_NAME, S.EMOJI_1_IMAGE]
         order_t2 = [S.ROLE_NAME, S.ROLE_IMAGE, S.ROLE_COLOR, S.EMOJI_1_NAME, S.EMOJI_1_IMAGE, S.EMOJI_2_NAME, S.EMOJI_2_IMAGE]
         order = order_t2 if tier == 2 else order_t1
-        if emoji_skipped:
-            order = [s for s in order if "emoji" not in s]
-
         try:
             step_num = order.index(flow.state) + 1
         except ValueError:
@@ -1197,7 +1749,7 @@ class Boost(commands.Cog):
                 color=c,
             )
         elif state == S.ROLE_IMAGE:
-            e = discord.Embed(title=title("Role Icon"), description="Upload an image for your role icon.\n\n• PNG recommended, square images look best\n• Accepted: PNG, JPEG, or WebP\n• Recommended: 64×64 px\n• *(Role icons require the server to be at Boost Level 2 — your image is saved and applied when eligible)*", color=c)
+            e = discord.Embed(title=title("Role Icon"), description="Upload an image for your role icon.\n\n• PNG recommended, square images look best\n• Accepted: PNG, JPEG, or WebP\n• Maximum: 256 KB\n• Recommended: 64×64 px", color=c)
         elif state == S.ROLE_COLOR:
             e = discord.Embed(title=title("Role Color"), description="What color should your role be?\n\nSend a hex color code — e.g. `#FF5733` or `A3C2FF`.", color=c)
         elif state == S.EMOJI_1_NAME:
@@ -1214,9 +1766,26 @@ class Boost(commands.Cog):
         e.set_footer(text=footer)
         return e
 
-    async def _send_prompt(self, user: discord.User | discord.Member, flow: DmFlow) -> None:
-        """Sends the prompt embed for the current flow step."""
-        await safe_dm(user, embed=self._build_prompt_embed(flow))
+    async def _send_prompt(self, user: discord.User | discord.Member, flow: DmFlow) -> bool:
+        """Send the modal dashboard, upgrading a legacy step flow if needed."""
+        legacy_states = {
+            S.ROLE_NAME,
+            S.ROLE_IMAGE,
+            S.ROLE_COLOR,
+            S.EMOJI_1_NAME,
+            S.EMOJI_1_IMAGE,
+            S.EMOJI_2_NAME,
+            S.EMOJI_2_IMAGE,
+        }
+        if flow.state in legacy_states:
+            flow.state = S.COLLECTING
+            self._set_emoji_availability(flow)
+            self.flow_store.save(flow)
+        return await safe_dm(
+            user,
+            embed=self._build_setup_embed(flow),
+            view=self._build_setup_view(flow),
+        )
 
     # ========================================================
     # Timeout task
@@ -1225,6 +1794,18 @@ class Boost(commands.Cog):
     @tasks.loop(hours=1)
     async def _expire_flows(self) -> None:
         """Clears flows that have been idle for more than 48 hours."""
+        for job_id, grant in self.boost_store.get_cleanup_jobs():
+            guild = self.bot.get_guild(grant.guild_id)
+            if guild is None:
+                continue
+            if await self._delete_grant_resources(guild, grant):
+                self.boost_store.delete_cleanup_job(job_id)
+                log(
+                    f"BOOST // RETRIED CLEANUP COMPLETE 『 JOB {job_id} 』 GUILD 『 {guild.id} 』",
+                    level="debug",
+                    logger_name="boost",
+                )
+
         expired = self.flow_store.get_expired(
             FLOW_TYPE, FLOW_TIMEOUT_SECONDS, exclude_state=S.PENDING
         )
@@ -1299,6 +1880,6 @@ async def setup(bot: commands.Bot) -> None:
     # Register the approval callback so the generic approval system can dispatch to us.
     register_approval_callback(FLOW_TYPE, cog._handle_approval)
 
-    # Register DynamicItems so approval buttons and confirmation buttons survive restarts.
+    # Register DynamicItems so approval, setup, and confirmation buttons survive restarts.
     add_dynamic_items(bot)
-    bot.add_dynamic_items(_ConfirmButton, _RestartButton)
+    bot.add_dynamic_items(_ConfirmButton, _RestartButton, _PerkButton)

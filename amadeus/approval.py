@@ -37,22 +37,53 @@ Callback signature
 """
 import re
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any
 
 import discord
 from discord.ext import commands
 
 from amadeus.database import ConfigStore
-from amadeus.discord_utils import NO_MENTIONS
+from amadeus.discord_utils import NO_MENTIONS, escape_untrusted_text
 from amadeus.logging_utils import log
 
 # Maps flow_type → async callback.
-_registry: dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
+@dataclass(frozen=True, slots=True)
+class ApprovalResult:
+    """Result returned by an approval handler after attempting to commit a decision."""
+
+    committed: bool
+    message: str
+
+
+_registry: dict[str, Callable[..., Coroutine[Any, Any, ApprovalResult]]] = {}
+
+
+def _decision_message_edit_options(
+    approval_message: discord.Message,
+    *,
+    approved: bool,
+    reviewer_mention: str,
+    comment: str | None,
+) -> dict[str, Any]:
+    """Keep the request summary but discard preview embeds and their files."""
+    decision_label = "✅ Approved" if approved else "❌ Denied"
+    content = f"{decision_label} by {reviewer_mention}"
+    if not approved:
+        reason = escape_untrusted_text(comment) if comment else "No reason provided."
+        content += f"\n**Reason:** {reason}"
+    return {
+        "content": content,
+        "embeds": approval_message.embeds[:1],
+        "attachments": [],
+        "view": None,
+        "allowed_mentions": NO_MENTIONS,
+    }
 
 
 def register_approval_callback(
     flow_type: str,
-    callback: Callable[..., Coroutine[Any, Any, None]],
+    callback: Callable[..., Coroutine[Any, Any, ApprovalResult]],
 ) -> None:
     """Register a handler to be invoked when an approve/deny decision is made."""
     _registry[flow_type] = callback
@@ -113,24 +144,8 @@ class _CommentModal(discord.ui.Modal, title="Add a comment (optional)"):
         # Defer before doing async work (role creation, DMs, etc. can be slow).
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Edit the approval message to reflect the decision and disable the buttons,
-        # preventing a second admin from inadvertently processing it twice.
-        decision_label = "✅ Approved" if self.approved else "❌ Denied"
         try:
-            await self.approval_message.edit(
-                content=f"{decision_label} by {interaction.user.mention}",
-                view=None,
-                allowed_mentions=NO_MENTIONS,
-            )
-        except (discord.Forbidden, discord.HTTPException) as e:
-            log(
-                f"APPROVAL // FAILED TO UPDATE APPROVAL MSG 『 {e} 』",
-                level="debug",
-                logger_name="approval",
-            )
-
-        try:
-            await callback(
+            result = await callback(
                 interaction=interaction,
                 bot=self.bot,
                 guild_id=self.guild_id,
@@ -150,6 +165,31 @@ class _CommentModal(discord.ui.Modal, title="Add a comment (optional)"):
                 "An error occurred while processing the decision.",
                 ephemeral=True,
             )
+            return
+
+        if not result.committed:
+            await interaction.followup.send(result.message, ephemeral=True)
+            return
+
+        # Only make the visible decision final after the handler commits it.
+        # This leaves retry controls intact for validation or Discord API failures.
+        try:
+            await self.approval_message.edit(
+                **_decision_message_edit_options(
+                    self.approval_message,
+                    approved=self.approved,
+                    reviewer_mention=interaction.user.mention,
+                    comment=comment,
+                )
+            )
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log(
+                f"APPROVAL // COMMITTED BUT FAILED TO UPDATE MSG 『 {e} 』",
+                level="warning",
+                logger_name="approval",
+            )
+
+        await interaction.followup.send(result.message, ephemeral=True)
 
 
 # ============================================================
@@ -389,4 +429,17 @@ async def post_approval_request(
         return True
     except (discord.Forbidden, discord.HTTPException) as e:
         log(f"APPROVAL // SEND FAILED 『 {e} 』 GUILD {guild_id}", level="debug", logger_name="approval")
+        try:
+            await channel.send(
+                f"⚠ Could not submit the approval request for <@{user_id}> (`{user_id}`). "
+                f"Discord returned `{escape_untrusted_text(str(e))}`. Check Attach Files, "
+                "Embed Links, View Channel, and Send Messages permissions, then contact the user manually.",
+                allowed_mentions=NO_MENTIONS,
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            log(
+                f"APPROVAL // FALLBACK ALERT FAILED 『 USER {user_id} 』 GUILD 『 {guild_id} 』",
+                level="warning",
+                logger_name="approval",
+            )
         return False

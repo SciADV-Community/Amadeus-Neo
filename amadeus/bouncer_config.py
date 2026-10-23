@@ -1,8 +1,6 @@
 """
 Bouncer module configuration storage.
 """
-import sqlite3
-
 from amadeus.database import BaseStore
 from amadeus.models.bouncer import BounceConfig
 
@@ -21,18 +19,15 @@ class BounceConfigStore(BaseStore):
             )
             """
         )
-        _new_columns = [
-            "min_account_age_days           INTEGER",
-            "max_failed_attempts            INTEGER",
-            "captcha_expiry_minutes         INTEGER",
-            "panel_image_url                TEXT",
-            "verification_role_delay_seconds REAL",
+        new_columns = [
+            ("min_account_age_days", "INTEGER"),
+            ("max_failed_attempts", "INTEGER"),
+            ("captcha_expiry_minutes", "INTEGER"),
+            ("panel_image_url", "TEXT"),
+            ("verification_role_delay_seconds", "REAL"),
         ]
-        for col_def in _new_columns:
-            try:
-                self.db.execute(f"ALTER TABLE bouncer_config ADD COLUMN {col_def}")
-            except sqlite3.OperationalError:
-                pass
+        for column, definition in new_columns:
+            self.add_column_if_missing("bouncer_config", column, definition)
         self.db.commit()
 
     def get_bouncer_config(self, guild_id: int) -> BounceConfig | None:

@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
@@ -20,6 +21,8 @@ class BaseStore:
         self.db = sqlite3.connect(DB_PATH, timeout=30)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self._initialize()
 
     def _initialize(self):
@@ -27,6 +30,25 @@ class BaseStore:
 
     def close(self):
         self.db.close()
+
+    def table_columns(self, table: str) -> set[str]:
+        exists = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        if not exists:
+            return set()
+        if not table.replace("_", "").isalnum():
+            raise ValueError("Invalid SQLite table name")
+        return {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+
+    def add_column_if_missing(self, table: str, column: str, definition: str) -> bool:
+        """Add a known migration column without masking unrelated SQLite errors."""
+        if column in self.table_columns(table):
+            return False
+        if not table.replace("_", "").isalnum() or not column.replace("_", "").isalnum():
+            raise ValueError("Invalid SQLite identifier")
+        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        return True
 
 
 def _ensure_database_path_ready(db_path: Path) -> None:
@@ -101,12 +123,57 @@ class ConfigStore(BaseStore):
             )
             """
         )
-        # Migration: add alert_channel_id if it doesn't exist yet.
-        try:
-            self.db.execute("ALTER TABLE guild_config ADD COLUMN alert_channel_id INTEGER")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_data_deletion (
+                guild_id INTEGER PRIMARY KEY,
+                delete_after TEXT NOT NULL
+            )
+            """
+        )
+        self.add_column_if_missing("guild_config", "alert_channel_id", "INTEGER")
         self.db.commit()
+
+    def schedule_guild_deletion(self, guild_id: int, *, days: int = 90) -> datetime:
+        delete_after = datetime.now(timezone.utc) + timedelta(days=days)
+        self.db.execute(
+            """
+            INSERT INTO guild_data_deletion (guild_id, delete_after) VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET delete_after = excluded.delete_after
+            """,
+            (guild_id, delete_after.isoformat()),
+        )
+        self.db.commit()
+        return delete_after
+
+    def cancel_guild_deletion(self, guild_id: int) -> bool:
+        cursor = self.db.execute(
+            "DELETE FROM guild_data_deletion WHERE guild_id = ?", (guild_id,)
+        )
+        self.db.commit()
+        return cursor.rowcount > 0
+
+    def get_due_guild_deletions(self, *, now: datetime | None = None) -> list[int]:
+        current = (now or datetime.now(timezone.utc)).isoformat()
+        rows = self.db.execute(
+            "SELECT guild_id FROM guild_data_deletion WHERE delete_after <= ? ORDER BY delete_after",
+            (current,),
+        ).fetchall()
+        return [row["guild_id"] for row in rows]
+
+    def purge_guild_data(self, guild_id: int) -> None:
+        """Delete rows from every current module table containing a guild_id column."""
+        tables = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        with self.db:
+            for row in tables:
+                table = row["name"]
+                if table == "guild_data_deletion":
+                    continue
+                if "guild_id" in self.table_columns(table):
+                    self.db.execute(f'DELETE FROM "{table}" WHERE guild_id = ?', (guild_id,))
+            self.db.execute("DELETE FROM guild_data_deletion WHERE guild_id = ?", (guild_id,))
 
     def ensure_guild_config(self, guild: discord.Guild) -> GuildConfig:
         """

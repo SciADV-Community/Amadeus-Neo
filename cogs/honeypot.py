@@ -4,7 +4,6 @@ import discord
 from discord.ext import commands
 
 from amadeus.alerts import send_alert
-from amadeus.constants import OWNER_ID
 from amadeus.database import ConfigStore
 from amadeus.discord_utils import escape_untrusted_text
 from amadeus.honeypot_config import HoneypotConfigStore
@@ -34,8 +33,8 @@ def honeypot_action_exemption_reason(
     if admin_role_id is not None and any(role.id == admin_role_id for role in member.roles):
         return "Skipped — member has the configured Amadeus admin role."
 
-    if action == "ban" and owner_id is not None and member.id == owner_id:
-        return "Skipped — configured Amadeus owner cannot be banned."
+    if owner_id is not None and member.id == owner_id:
+        return "Skipped — member is the server owner."
 
     return None
 
@@ -186,7 +185,7 @@ class Honeypot(commands.Cog):
             member,
             config.action,
             admin_role_id,
-            owner_id=OWNER_ID,
+            owner_id=message.guild.owner_id,
         )
         if result is None:
             result = await execute_action(

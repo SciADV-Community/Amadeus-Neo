@@ -1,8 +1,6 @@
 """
 Honeypot module configuration storage.
 """
-import sqlite3
-
 from amadeus.database import BaseStore
 from amadeus.models.honeypot import HoneypotConfig
 
@@ -27,22 +25,13 @@ class HoneypotConfigStore(BaseStore):
             )
             """
         )
-        try:
-            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN action_reason TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN delete_history_seconds INTEGER")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN post_message TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        try:
-            self.db.execute("ALTER TABLE honeypot_config ADD COLUMN post_message_id INTEGER")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for column, definition in (
+            ("action_reason", "TEXT"),
+            ("delete_history_seconds", "INTEGER"),
+            ("post_message", "TEXT"),
+            ("post_message_id", "INTEGER"),
+        ):
+            self.add_column_if_missing("honeypot_config", column, definition)
         self.db.commit()
 
     def get_config(self, guild_id: int) -> HoneypotConfig | None:

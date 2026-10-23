@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from amadeus.cogs import (
     STATIC_COG_EXTENSIONS,
@@ -18,6 +18,7 @@ _ADMIN_CHANNEL_REQUIRED_PERMS: tuple[tuple[str, str], ...] = (
     ("view_channel", "View Channel"),
     ("send_messages", "Send Messages"),
     ("embed_links", "Embed Links"),
+    ("attach_files", "Attach Files"),
 )
 
 
@@ -220,6 +221,7 @@ class AmadeusAdmin(commands.Cog):
         self.store = ConfigStore()
 
     def cog_unload(self):
+        self._purge_departed_guilds.cancel()
         self.store.close()
 
     # ========================================================
@@ -229,14 +231,45 @@ class AmadeusAdmin(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
         log(f"ADMIN // GUILD JOIN 『 {guild.name} | {guild.id} 』", level="debug", logger_name="admin")
+        self.store.cancel_guild_deletion(guild.id)
         self.store.ensure_guild_config(guild)
         await self._send_setup_prompt(guild)
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild):
+        delete_after = self.store.schedule_guild_deletion(guild.id, days=90)
+        log(
+            f"ADMIN // GUILD LEFT 『 {guild.id} 』 // DATA DELETE AFTER 『 {delete_after.isoformat()} 』",
+            level="warning",
+            logger_name="admin",
+        )
 
     @commands.Cog.listener()
     async def on_ready(self):
         log(f"ADMIN // READY // ENSURING CONFIG FOR 『 {len(self.bot.guilds)} 』 GUILDS", level="debug", logger_name="admin")
         for guild in self.bot.guilds:
+            self.store.cancel_guild_deletion(guild.id)
             self.store.ensure_guild_config(guild)
+        if not self._purge_departed_guilds.is_running():
+            self._purge_departed_guilds.start()
+
+    @tasks.loop(hours=24)
+    async def _purge_departed_guilds(self) -> None:
+        active_guild_ids = {guild.id for guild in self.bot.guilds}
+        for guild_id in self.store.get_due_guild_deletions():
+            if guild_id in active_guild_ids:
+                self.store.cancel_guild_deletion(guild_id)
+                continue
+            self.store.purge_guild_data(guild_id)
+            log(
+                f"ADMIN // PURGED DEPARTED GUILD DATA 『 {guild_id} 』",
+                level="warning",
+                logger_name="admin",
+            )
+
+    @_purge_departed_guilds.before_loop
+    async def _before_purge_departed_guilds(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _send_setup_prompt(self, guild: discord.Guild):
         module_list = ", ".join(
@@ -336,6 +369,32 @@ class AmadeusAdmin(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        if module == "boost":
+            if config.alert_channel_id is None:
+                await interaction.response.send_message(
+                    "Set an admin alert channel before enabling boost with "
+                    "`/amadeus set-admin-channel`.",
+                    ephemeral=True,
+                )
+                return
+            alert_channel = interaction.guild.get_channel(config.alert_channel_id)
+            bot_member = interaction.guild.me
+            if not isinstance(alert_channel, discord.TextChannel) or bot_member is None:
+                await interaction.response.send_message(
+                    "The configured admin alert channel is missing or unavailable. "
+                    "Run `/amadeus set-admin-channel` again.",
+                    ephemeral=True,
+                )
+                return
+            missing = _missing_admin_channel_permissions(alert_channel, bot_member)
+            if missing:
+                await interaction.response.send_message(
+                    f"Boost was not enabled. Grant me {', '.join(missing)} in "
+                    f"{alert_channel.mention}, then try again.",
+                    ephemeral=True,
+                )
+                return
 
         self.store.enable_module(interaction.guild.id, module)
 
@@ -509,6 +568,61 @@ class AmadeusAdmin(commands.Cog):
         modules_value = ", ".join(f"`{m}`" for m in sorted(enabled_modules)) or "None enabled"
         embed.add_field(name="Enabled modules", value=modules_value, inline=False)
 
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @amadeus.command(
+        name="health",
+        description="Check Amadeus configuration and operational health for this server.",
+    )
+    async def amadeus_health(self, interaction: discord.Interaction):
+        config = await require_amadeus_access(interaction, self.store)
+        if config is None or interaction.guild is None:
+            return
+
+        guild = interaction.guild
+        issues: list[str] = []
+        db_result = self.store.db.execute("PRAGMA quick_check").fetchone()[0]
+        if db_result != "ok":
+            issues.append(f"Database integrity check returned: `{db_result}`")
+
+        admin_role = get_admin_role(guild, config)
+        if admin_role is None:
+            issues.append("Configured Amadeus admin role is missing.")
+
+        alert_channel = guild.get_channel(config.alert_channel_id) if config.alert_channel_id else None
+        if not isinstance(alert_channel, discord.TextChannel):
+            issues.append("Admin alert channel is not configured or no longer exists.")
+        elif guild.me is None:
+            issues.append("Bot member information is unavailable.")
+        else:
+            missing = _missing_admin_channel_permissions(alert_channel, guild.me)
+            if missing:
+                issues.append(f"Admin alert channel is missing: {', '.join(missing)}.")
+
+        enabled = self.store.get_enabled_modules(guild.id)
+        unloaded = sorted(
+            module for module in enabled if f"cogs.{module}" not in self.bot.extensions
+        )
+        if unloaded:
+            issues.append(f"Enabled but not loaded: {', '.join(unloaded)}.")
+
+        boost_store = getattr(self.bot.get_cog("Boost"), "boost_store", None)
+        pending_cleanup = boost_store.count_cleanup(guild.id) if boost_store else 0
+        if pending_cleanup:
+            issues.append(f"{pending_cleanup} boost resource cleanup job(s) are pending.")
+
+        embed = discord.Embed(
+            title="Amadeus Health",
+            color=discord.Color.green() if not issues else discord.Color.orange(),
+        )
+        embed.add_field(name="Database", value="✅ OK" if db_result == "ok" else "❌ Error")
+        embed.add_field(name="Gateway latency", value=f"{self.bot.latency * 1000:.0f} ms")
+        embed.add_field(name="Enabled modules", value=", ".join(sorted(enabled)) or "None", inline=False)
+        embed.add_field(
+            name="Result",
+            value="✅ No issues found." if not issues else "\n".join(f"• {issue}" for issue in issues),
+            inline=False,
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @amadeus.command(

@@ -1,12 +1,15 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import sqlite3
+from types import SimpleNamespace
 
 import discord
+import pytest
 
-from amadeus.activity_store import ActivityStore
+from amadeus.activity_store import ActivityStore, previous_utc_month_key, utc_month_key
 from amadeus.boost_store import BoostStore
 from amadeus.bouncer_config import BounceConfigStore
 from amadeus.dm_flow import DmFlowStore
+from amadeus.database import ConfigStore
 from amadeus.models.boost import BoostGrant
 from amadeus.models.dm_flow import DmFlow
 from amadeus.play_store import PlayStore, normalize_game_key
@@ -129,7 +132,12 @@ def test_activity_store_tracks_cooldown_channels_tiers_and_counts(temp_db_path):
         store.add_tier(1, 100, 10)
         store.add_tier(1, 50, 5)
         store.add_tier(1, 100, 11)
+        store.add_tier(1, 25, 20, monthly=True)
         assert store.get_tiers(1) == [(50, 5), (100, 11)]
+        assert store.get_tiers(1, monthly=True) == [(25, 20)]
+        assert store.get_tier(1, 25, monthly=True) == (25, 20)
+        assert store.get_tier(1, 999) is None
+        assert store.get_tier_uses_for_role(1, 20) == [("monthly", 25)]
         assert store.remove_tier(1, 50) is True
         assert store.remove_tier(1, 999) is False
 
@@ -137,8 +145,62 @@ def test_activity_store_tracks_cooldown_channels_tiers_and_counts(temp_db_path):
         assert store.increment_count(1, 2) == 1
         assert store.increment_count(1, 2) == 2
         assert store.increment_count(1, 3) == 1
-        assert store.get_count(1, 2) == 2
-        assert store.get_leaderboard(1, limit=2) == [(2, 2), (3, 1)]
+        assert store.increment_counts(1, 2, month="2026-10") == (3, 1)
+        assert store.get_count(1, 2) == 3
+        assert store.get_count(1, 2, monthly=True, month="2026-10") == 1
+        assert store.get_leaderboard(1, limit=2) == [(2, 3), (3, 1)]
+        assert store.get_leaderboard(1, monthly=True, month="2026-10") == [(2, 1)]
+    finally:
+        store.close()
+
+
+def test_activity_month_keys_use_utc_calendar_boundaries():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+    assert utc_month_key(now) == "2026-01"
+    assert previous_utc_month_key(now) == "2025-12"
+
+
+def test_activity_store_migrates_legacy_rows_to_all_time(temp_db_path):
+    db = sqlite3.connect(temp_db_path)
+    db.executescript(
+        """
+        CREATE TABLE activity_tiers (
+            guild_id INTEGER NOT NULL,
+            threshold INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, threshold)
+        );
+        CREATE TABLE activity_counts (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        INSERT INTO activity_tiers VALUES (1, 50, 10);
+        INSERT INTO activity_counts VALUES (1, 2, 99);
+        """
+    )
+    db.close()
+
+    store = ActivityStore()
+    try:
+        assert store.get_tiers(1) == [(50, 10)]
+        assert store.get_tiers(1, monthly=True) == []
+        assert store.get_count(1, 2) == 99
+        assert store.get_count(1, 2, monthly=True, month="2026-10") == 0
+    finally:
+        store.close()
+
+
+def test_activity_tier_roles_are_unique_across_scopes(temp_db_path):
+    store = ActivityStore()
+    try:
+        store.add_tier(1, 10, 99)
+        with pytest.raises(sqlite3.IntegrityError):
+            store.add_tier(1, 20, 99, monthly=True)
     finally:
         store.close()
 
@@ -170,6 +232,52 @@ def test_boost_store_tracks_subscription_count_and_grant_lifecycle(temp_db_path)
         store.delete_grant(1, 2)
         assert store.get_grant(1, 2) is None
     finally:
+        store.close()
+
+
+def test_boost_store_tracks_deferred_cleanup_jobs(temp_db_path):
+    store = BoostStore()
+    try:
+        grant = BoostGrant(1, 2, 1, role_id=10, emoji_1_id=20)
+        job_id = store.queue_cleanup(grant)
+
+        assert store.count_cleanup(1) == 1
+        assert store.get_cleanup_jobs(1) == [(job_id, grant)]
+
+        store.delete_cleanup_job(job_id)
+        assert store.get_cleanup_jobs(1) == []
+    finally:
+        store.close()
+
+
+def test_departed_guild_data_is_purged_and_rejoin_cancels_deletion(temp_db_path):
+    store = ConfigStore()
+    activity = ActivityStore()
+    try:
+        guild = SimpleNamespace(id=1, owner_id=2)
+        store.ensure_guild_config(guild)
+        store.enable_module(1, "activity")
+        activity.increment_count(1, 3)
+
+        store.schedule_guild_deletion(1, days=90)
+        assert store.cancel_guild_deletion(1) is True
+        assert store.get_due_guild_deletions(
+            now=datetime.now(timezone.utc) + timedelta(days=91)
+        ) == []
+
+        store.schedule_guild_deletion(1, days=90)
+        due = store.get_due_guild_deletions(
+            now=datetime.now(timezone.utc) + timedelta(days=91)
+        )
+        assert due == [1]
+        store.purge_guild_data(1)
+
+        assert activity.get_count(1, 3) == 0
+        assert store.get_enabled_modules(1) == set()
+        with pytest.raises(RuntimeError):
+            store.get_guild_config(1)
+    finally:
+        activity.close()
         store.close()
 
 

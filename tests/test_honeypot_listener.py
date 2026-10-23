@@ -45,7 +45,9 @@ def make_cog(config=None, *, enabled=True, guild_config=None):
 
 
 def make_message(*, guild_id=1, channel_id=10, author=None, content="trap", guild=None):
-    guild = guild or SimpleNamespace(id=guild_id)
+    guild = guild or SimpleNamespace(id=guild_id, owner_id=999)
+    if not hasattr(guild, "owner_id"):
+        guild.owner_id = 999
     return SimpleNamespace(
         guild=guild,
         channel=SimpleNamespace(id=channel_id),
@@ -65,14 +67,14 @@ def test_honeypot_action_exemption_reason_skips_configured_admin_role():
     )
 
 
-def test_honeypot_action_exemption_reason_only_blocks_env_owner_bans():
+def test_honeypot_action_exemption_reason_blocks_server_owner_for_every_action():
     member = FakeMember(2)
 
     assert (
         honeypot_action_exemption_reason(member, "ban", admin_role_id=None, owner_id=2)
-        == "Skipped — configured Amadeus owner cannot be banned."
+        == "Skipped — member is the server owner."
     )
-    assert honeypot_action_exemption_reason(member, "kick", admin_role_id=None, owner_id=2) is None
+    assert honeypot_action_exemption_reason(member, "kick", admin_role_id=None, owner_id=2) is not None
 
 
 def test_honeypot_ignores_dm_messages():
@@ -232,9 +234,8 @@ def test_honeypot_skips_action_for_configured_admin_role(monkeypatch):
     execute_action.assert_not_awaited()
 
 
-def test_honeypot_skips_ban_for_configured_env_owner(monkeypatch):
+def test_honeypot_skips_actions_for_guild_owner(monkeypatch):
     monkeypatch.setattr(honeypot_module.discord, "Member", FakeMember)
-    monkeypatch.setattr(honeypot_module, "OWNER_ID", 2)
     execute_action = AsyncMock()
     monkeypatch.setattr(honeypot_module, "execute_action", execute_action)
     monkeypatch.setattr(honeypot_module, "send_alert", AsyncMock())
@@ -246,7 +247,7 @@ def test_honeypot_skips_ban_for_configured_env_owner(monkeypatch):
         alerts_enabled=False,
     )
     cog = make_cog(config)
-    message = make_message(author=FakeMember(2))
+    message = make_message(author=FakeMember(2), guild=SimpleNamespace(id=1, owner_id=2))
 
     asyncio.run(cog.on_message(message))
 

@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import discord
 
@@ -7,6 +8,7 @@ from cogs.amadeus_admin import AmadeusAdmin
 from cogs.boost_admin import setup as setup_boost_admin
 from cogs.bouncer_admin import setup as setup_bouncer_admin
 from cogs.honeypot_admin import setup as setup_honeypot_admin
+from cogs.amadeus_admin import _missing_admin_channel_permissions
 from cogs.play import setup as setup_play
 from cogs.play_admin import setup as setup_play_admin
 
@@ -60,6 +62,20 @@ def command_names(group):
     return set(group._children)
 
 
+def test_admin_channel_permissions_require_file_attachments():
+    permissions = SimpleNamespace(
+        view_channel=True,
+        send_messages=True,
+        embed_links=True,
+        attach_files=False,
+    )
+    channel = SimpleNamespace(permissions_for=lambda member: permissions)
+
+    assert _missing_admin_channel_permissions(channel, SimpleNamespace()) == [
+        "Attach Files"
+    ]
+
+
 def test_module_admin_commands_attach_under_amadeus(temp_db_path):
     bot = make_bot()
 
@@ -75,6 +91,7 @@ def test_module_admin_commands_attach_under_amadeus(temp_db_path):
         assert {"activity", "boost", "bouncer", "debug", "honeypot", "play"}.issubset(
             command_names(amadeus)
         )
+        assert "health" in command_names(amadeus)
 
         assert command_names(amadeus._children["debug"]) == {
             "ping",
@@ -155,7 +172,11 @@ def test_public_roots_remain_member_facing_only(temp_db_path):
         assert [command.name for command in activity.__cog_app_commands__] == [
             "activity"
         ]
-        assert command_names(activity.activity) == {"status", "leaderboard"}
+        assert command_names(activity.activity) == {"status", "leaderboard", "monthly"}
+        assert command_names(activity.activity._children["monthly"]) == {
+            "status",
+            "leaderboard",
+        }
 
         assert [command.name for command in boost.__cog_app_commands__] == ["boost"]
         assert command_names(boost.boost) == {"status"}

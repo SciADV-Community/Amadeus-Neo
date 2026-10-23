@@ -46,16 +46,10 @@ class PlayStore(BaseStore):
             )
             """
         )
-        try:
-            self.db.execute("ALTER TABLE play_game ADD COLUMN forum_channel_id INTEGER")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self.db.execute(
-                "ALTER TABLE play_game ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
-            )
-        except sqlite3.OperationalError:
-            pass
+        self.add_column_if_missing("play_game", "forum_channel_id", "INTEGER")
+        self.add_column_if_missing(
+            "play_game", "sort_order", "INTEGER NOT NULL DEFAULT 0"
+        )
         self.db.execute(
             """
             UPDATE play_game

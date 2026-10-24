@@ -176,3 +176,63 @@ def test_failed_monthly_role_change_sends_alert(monkeypatch):
     assert succeeded is False
     send_alert.assert_awaited_once()
     assert "Failed to assign" in send_alert.await_args.args[3]
+
+
+def test_failed_monthly_role_change_alerts_on_a_fresh_monotonic_clock(monkeypatch):
+    """Regression: on a freshly booted host time.monotonic() starts below the
+    cooldown, so the first alert must not be treated as already sent."""
+    response = SimpleNamespace(status=403, reason="Forbidden")
+    member = SimpleNamespace(
+        id=2,
+        guild=SimpleNamespace(id=1),
+        add_roles=AsyncMock(side_effect=discord.Forbidden(response, "no permission")),
+        remove_roles=AsyncMock(),
+    )
+    role = FakeRole(10)
+    send_alert = AsyncMock(return_value=True)
+    monkeypatch.setattr(activity_module, "send_alert", send_alert)
+    # Replace only this module's reference; the event loop keeps the real clock.
+    monkeypatch.setattr(
+        activity_module, "time", SimpleNamespace(monotonic=lambda: 5.0)
+    )
+
+    cog = Activity.__new__(Activity)
+    cog.bot = SimpleNamespace()
+    cog.module_store = SimpleNamespace()
+    cog._role_alert_sent_at = {}
+
+    succeeded = asyncio.run(
+        cog._change_monthly_role(member, role, add=True, period="2026-09")
+    )
+
+    assert succeeded is False
+    send_alert.assert_awaited_once()
+
+
+def test_failed_monthly_role_change_respects_cooldown(monkeypatch):
+    response = SimpleNamespace(status=403, reason="Forbidden")
+    member = SimpleNamespace(
+        id=2,
+        guild=SimpleNamespace(id=1),
+        add_roles=AsyncMock(side_effect=discord.Forbidden(response, "no permission")),
+        remove_roles=AsyncMock(),
+    )
+    role = FakeRole(10)
+    send_alert = AsyncMock(return_value=True)
+    monkeypatch.setattr(activity_module, "send_alert", send_alert)
+    monkeypatch.setattr(
+        activity_module, "time", SimpleNamespace(monotonic=lambda: 5.0)
+    )
+
+    cog = Activity.__new__(Activity)
+    cog.bot = SimpleNamespace()
+    cog.module_store = SimpleNamespace()
+    # An alert was sent moments ago; it should be suppressed.
+    cog._role_alert_sent_at = {1: 4.9}
+
+    succeeded = asyncio.run(
+        cog._change_monthly_role(member, role, add=True, period="2026-09")
+    )
+
+    assert succeeded is False
+    send_alert.assert_not_awaited()

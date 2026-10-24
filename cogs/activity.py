@@ -75,6 +75,19 @@ class Activity(commands.Cog):
     def invalidate_cache(self, guild_id: int) -> None:
         self._cache.pop(guild_id, None)
 
+    def _claim_role_alert_slot(self, guild_id: int) -> bool:
+        """
+        Return True when a role-failure alert for this guild is due, recording
+        the send time. The first alert always sends: we must not assume the
+        monotonic clock starts above the cooldown (it is uptime-based on Linux).
+        """
+        now = time.monotonic()
+        last_sent = self._role_alert_sent_at.get(guild_id)
+        if last_sent is not None and now - last_sent < _ROLE_ALERT_COOLDOWN_SECONDS:
+            return False
+        self._role_alert_sent_at[guild_id] = now
+        return True
+
     def _get_cache(self, guild_id: int) -> _GuildCache:
         if guild_id not in self._cache:
             cooldown = self.activity_store.get_cooldown(guild_id)
@@ -176,9 +189,7 @@ class Activity(commands.Cog):
                     level="debug",
                     logger_name="activity",
                 )
-                now = time.monotonic()
-                if now - self._role_alert_sent_at.get(guild.id, 0.0) >= _ROLE_ALERT_COOLDOWN_SECONDS:
-                    self._role_alert_sent_at[guild.id] = now
+                if self._claim_role_alert_slot(guild.id):
                     await send_alert(
                         self.bot,
                         self.module_store,
@@ -245,9 +256,7 @@ class Activity(commands.Cog):
                 level="debug",
                 logger_name="activity",
             )
-            now = time.monotonic()
-            if now - self._role_alert_sent_at.get(guild.id, 0.0) >= _ROLE_ALERT_COOLDOWN_SECONDS:
-                self._role_alert_sent_at[guild.id] = now
+            if self._claim_role_alert_slot(guild.id):
                 await send_alert(
                     self.bot,
                     self.module_store,
@@ -382,10 +391,8 @@ class Activity(commands.Cog):
                 level="warning",
                 logger_name="activity",
             )
-            now = time.monotonic()
             guild_id = member.guild.id
-            if now - self._role_alert_sent_at.get(guild_id, 0.0) >= _ROLE_ALERT_COOLDOWN_SECONDS:
-                self._role_alert_sent_at[guild_id] = now
+            if self._claim_role_alert_slot(guild_id):
                 action_text = "assign" if add else "remove"
                 await send_alert(
                     self.bot,

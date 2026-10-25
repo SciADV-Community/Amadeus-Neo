@@ -1,6 +1,27 @@
 # Changelog
 
 ---
+
+### 2.1.0
+- Boost perks are optional now
+  - A member can request any mix of their tier's perks and skip the rest
+  - The setup dashboard has **Submit for Review** and **Clear** buttons, so a request can be sent without filling in every perk
+  - **Clear** wipes the current choices so the member can start over
+  - Entries left blank are skipped, and a perk that's been started has to be finished before submitting
+  - Submitting sends the request to the admin channel right away and replies with a private confirmation instead of a second review screen
+  - Only the requested perks show up in the admin approval embed, previews, and image attachments
+  - Role icons and Boost Level 2 are only needed when a role is requested, and capacity is checked against just the requested perks
+- Removed the leftover one-message-at-a-time boost steps
+- Removed the final boost review DM. Submitting goes straight to the admin channel now
+- Admin-forced boost setups aren't resumed by the member anymore
+  - `/boost status` and the DM keywords clear the leftover flow, so an admin has to force a new one
+  - A forced request that's already waiting on a decision is left alone
+- `/boost status` refreshes a stale boost flow from an older version instead of sending a dashboard whose buttons do nothing
+
+### 2.0.1
+- Fixed a bug where Role.edit() was using icon rather than display_icon, breaking approval flow
+
+
 ### 2.0.0
 - Activity now keeps an all-time count and a separate count for each UTC month
 - Added `/activity monthly status` and `/activity monthly leaderboard`

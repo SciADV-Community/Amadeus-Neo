@@ -41,7 +41,7 @@ def test_boost_tier_perks_text_varies_by_tier():
     assert "Color cannot clash" in tier_two
 
 
-def test_boost_setup_dashboard_has_one_button_per_unlocked_item():
+def test_boost_setup_dashboard_lists_perks_and_an_always_present_submit():
     cog = Boost.__new__(Boost)
     tier_one = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 1})
     tier_two = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 2})
@@ -49,11 +49,41 @@ def test_boost_setup_dashboard_has_one_button_per_unlocked_item():
     tier_one_labels = [item.item.label for item in cog._build_setup_view(tier_one).children]
     tier_two_labels = [item.item.label for item in cog._build_setup_view(tier_two).children]
 
-    assert tier_one_labels == ["Custom Role", "Emoji 1"]
-    assert tier_two_labels == ["Custom Role", "Emoji 1", "Emoji 2"]
+    assert tier_one_labels == ["Custom Role", "Emoji 1", "Submit for Review", "Clear"]
+    assert tier_two_labels == [
+        "Custom Role",
+        "Emoji 1",
+        "Emoji 2",
+        "Submit for Review",
+        "Clear",
+    ]
 
 
-def test_boost_setup_dashboard_marks_completed_items():
+def test_clear_button_is_red():
+    cog = Boost.__new__(Boost)
+    flow = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 1})
+
+    clear = next(
+        item.item
+        for item in cog._build_setup_view(flow).children
+        if getattr(item.item, "label", None) == "Clear"
+    )
+
+    assert clear.style is discord.ButtonStyle.danger
+
+
+def test_boost_setup_embed_ends_instructions_with_a_divider():
+    cog = Boost.__new__(Boost)
+    cog.bot = SimpleNamespace(get_guild=lambda guild_id: None)
+    flow = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 1})
+
+    embed = cog._build_setup_embed(flow)
+
+    assert "Press **Submit for Review**" in embed.description
+    assert embed.description.rstrip().endswith(boost_module._EMBED_DIVIDER)
+
+
+def test_boost_setup_dashboard_marks_completed_items_and_offers_clear():
     cog = Boost.__new__(Boost)
     flow = DmFlow(
         1,
@@ -69,8 +99,9 @@ def test_boost_setup_dashboard_marks_completed_items():
 
     labels = [item.item.label for item in cog._build_setup_view(flow).children]
 
-    assert labels == ["✓ Custom Role", "Emoji 1"]
-    assert Boost._collection_complete(flow) is False
+    assert labels == ["✓ Custom Role", "Emoji 1", "Submit for Review", "Clear"]
+    assert Boost._has_selection(flow) is True
+    assert Boost._selection_valid(flow) is True
 
 
 def test_role_modals_match_tier_fields_and_use_file_uploads():
@@ -100,44 +131,49 @@ def test_emoji_modal_collects_name_and_image_together():
     assert components[2]["component"]["type"] == 19
 
 
-def test_boost_confirmation_is_one_names_only_embed(monkeypatch):
+def test_approval_embed_lists_only_requested_perks():
     cog = Boost.__new__(Boost)
-    cog.bot = SimpleNamespace(get_guild=lambda guild_id: SimpleNamespace(name="Steins;Gate"))
-    cog.flow_store = SimpleNamespace(save=lambda flow: None)
     flow = DmFlow(
         1,
         2,
         "boost",
-        S.COLLECTING,
+        S.PENDING,
         {
             "tier": 2,
             "role_name": "Future Gadget Lab",
             "role_image_b64": "cm9sZQ==",
+            "role_color_hex": "#12ABEF",
             "emoji_1_name": "kurisu",
-            "emoji_1_b64": "ZW1vamkx",
-            "emoji_2_name": "mayuri",
-            "emoji_2_b64": "ZW1vamky",
+            "emoji_1_b64": "ZW1vamk=",
+            # Emoji 2 intentionally skipped.
         },
     )
-    send_dm = AsyncMock(return_value=True)
-    monkeypatch.setattr(boost_module, "safe_dm", send_dm)
 
-    asyncio.run(cog._send_confirmation(SimpleNamespace(id=2), flow))
+    embed = cog._build_approval_embed(flow, SimpleNamespace(name="Steins;Gate"))
+    perks = next(field for field in embed.fields if field.name == "Requested Perks")
 
-    kwargs = send_dm.await_args.kwargs
-    assert "embeds" not in kwargs
-    assert "files" not in kwargs
-    embed = kwargs["embed"]
-    assert len(embed.fields) == 0
-    assert embed.image.url is None
-    assert "Future Gadget Lab" in embed.description
-    assert "kurisu" in embed.description
-    assert "mayuri" in embed.description
-    assert "cm9sZQ==" not in embed.description
-    assert [item.item.label for item in kwargs["view"].children] == [
-        "Submit for Review",
-        "Start Over",
-    ]
+    assert "Custom Role" in perks.value
+    assert "Emoji 1" in perks.value
+    assert "Emoji 2" not in perks.value
+
+
+def test_preview_payload_omits_skipped_perks():
+    cog = Boost.__new__(Boost)
+    flow = DmFlow(
+        1,
+        2,
+        "boost",
+        S.PENDING,
+        {"tier": 2, "emoji_1_name": "kurisu", "emoji_1_b64": "ZW1vamk="},
+    )
+
+    embeds, files = cog._build_preview_payload(flow, discord.Embed(title="Request"))
+
+    titles = [embed.title for embed in embeds]
+    assert "Role Preview" not in titles
+    assert "Emoji 1 Preview" in titles
+    assert "Emoji 2 Preview" not in titles
+    assert len(files) == 1
 
 
 def test_modal_success_only_updates_dashboard():
@@ -176,72 +212,260 @@ def test_preview_frames_are_padded_to_full_embed_width():
     assert padded.getpixel((0, 0)) == (0, 0, 0, 0)
 
 
-def test_boost_capacity_requires_role_emoji_and_role_icon_space():
-    full_roles = SimpleNamespace(id=1, roles=[object()] * 250)
-    assert "role limit" in Boost._boost_capacity_error(full_roles, 1)
-
-    full_emojis = SimpleNamespace(
-        id=1,
-        roles=[],
-        emojis=[SimpleNamespace(managed=False)],
-        emoji_limit=1,
-        premium_tier=2,
-    )
-    assert "free emoji" in Boost._boost_capacity_error(full_emojis, 1)
-
-    no_role_icons = SimpleNamespace(
+def _capacity_guild(**overrides):
+    guild = SimpleNamespace(
         id=1,
         roles=[],
         emojis=[],
         emoji_limit=5,
-        premium_tier=1,
+        premium_tier=2,
     )
-    assert "Boost Level 2" in Boost._boost_capacity_error(no_role_icons, 1)
+    for key, value in overrides.items():
+        setattr(guild, key, value)
+    return guild
 
 
-def test_start_flow_capacity_failure_alerts_admin_without_saving(monkeypatch):
+def test_boost_request_capacity_checks_only_the_requested_items():
     cog = Boost.__new__(Boost)
-    cog.bot = SimpleNamespace()
+    full_roles = _capacity_guild(roles=[object()] * 250)
+    full_emojis = _capacity_guild(
+        emojis=[SimpleNamespace(managed=False)], emoji_limit=1
+    )
+    below_level_two = _capacity_guild(premium_tier=1)
+
+    role_only = {"tier": 2, "role_name": "Lab", "role_image_b64": "cm9sZQ==", "role_color_hex": "#FFFFFF"}
+    emoji_only = {"tier": 1, "emoji_1_name": "kurisu", "emoji_1_b64": "ZW1vamk="}
+
+    # A full role list does not block an emoji-only request.
+    assert cog._request_capacity_error(full_roles, emoji_only) is None
+    # A full emoji list does not block a role-only request.
+    assert cog._request_capacity_error(full_emojis, role_only) is None
+    # Below Boost Level 2 does not block an emoji-only request.
+    assert cog._request_capacity_error(below_level_two, emoji_only) is None
+
+    # The requested items are still validated.
+    assert "role limit" in cog._request_capacity_error(full_roles, role_only)
+    assert "free emoji" in cog._request_capacity_error(full_emojis, emoji_only)
+    assert "Boost Level 2" in cog._request_capacity_error(below_level_two, role_only)
+
+
+def test_start_flow_no_longer_blocks_on_capacity(monkeypatch):
+    cog = Boost.__new__(Boost)
+    cog.bot = SimpleNamespace(get_guild=lambda guild_id: None)
     cog.module_store = SimpleNamespace()
     cog.flow_store = SimpleNamespace(save=Mock())
+    prompt = AsyncMock(return_value=True)
+    monkeypatch.setattr(cog, "_send_prompt", prompt)
+    # A guild at the role limit would previously have refused to start.
     guild = SimpleNamespace(id=1, roles=[object()] * 250)
     member = SimpleNamespace(id=2)
-    alert = AsyncMock(return_value=True)
-    monkeypatch.setattr(boost_module, "send_alert", alert)
 
     started = asyncio.run(cog._start_flow(guild, member, 1))
 
-    assert started is False
-    cog.flow_store.save.assert_not_called()
-    assert "<@2>" in alert.await_args.args[3]
+    assert started is True
+    cog.flow_store.save.assert_called_once()
+    prompt.assert_awaited_once()
 
 
-def test_confirmation_dm_failure_keeps_resumable_state_and_alerts(monkeypatch):
+def test_partial_perk_is_not_submittable():
+    role_without_icon = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 1, "role_name": "Lab"})
+    emoji_without_image = DmFlow(
+        1, 2, "boost", S.COLLECTING, {"tier": 1, "emoji_1_name": "kurisu"}
+    )
+
+    assert Boost._selection_valid(role_without_icon) is False
+    assert Boost._selection_valid(emoji_without_image) is False
+    assert Boost._has_selection(role_without_icon) is False
+
+
+def test_handle_confirm_requires_at_least_one_perk():
+    flow = DmFlow(1, 2, "boost", S.COLLECTING, {"tier": 1})
     cog = Boost.__new__(Boost)
-    cog.bot = SimpleNamespace(get_guild=lambda guild_id: SimpleNamespace(name="Steins;Gate"))
+    cog.flow_store = SimpleNamespace(get=lambda *args: flow, save=Mock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=2),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    asyncio.run(cog.handle_confirm(interaction, 1, 2))
+
+    interaction.response.send_message.assert_awaited_once()
+    assert "at least one perk" in interaction.response.send_message.await_args.args[0].lower()
+    assert flow.state == S.COLLECTING
+
+
+def test_handle_confirm_submits_for_review(monkeypatch):
+    flow = DmFlow(
+        1,
+        2,
+        "boost",
+        S.COLLECTING,
+        {"tier": 1, "role_name": "Lab", "role_image_b64": "cm9sZQ=="},
+    )
+    cog = Boost.__new__(Boost)
+    cog.bot = SimpleNamespace(get_guild=lambda guild_id: None)
     cog.module_store = SimpleNamespace()
-    cog.flow_store = SimpleNamespace(save=lambda flow: None)
+    cog.flow_store = SimpleNamespace(get=lambda *args: flow, save=lambda updated: None)
+    posted = AsyncMock(return_value=True)
+    monkeypatch.setattr(boost_module, "post_approval_request", posted)
+    message = SimpleNamespace(edit=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=2),
+        message=message,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    asyncio.run(cog.handle_confirm(interaction, 1, 2))
+
+    assert flow.state == S.PENDING
+    posted.assert_awaited_once()
+    interaction.response.defer.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once()
+    assert "submitted" in interaction.followup.send.await_args.args[0].lower()
+    # The submitted dashboard must stop showing usable buttons.
+    message.edit.assert_awaited_once_with(view=None)
+
+
+def test_handle_confirm_rejects_a_second_submission(monkeypatch):
+    # A second click lands while the first is still posting (state PROCESSING).
+    flow = DmFlow(
+        1,
+        2,
+        "boost",
+        S.PROCESSING,
+        {"tier": 1, "role_name": "Lab", "role_image_b64": "cm9sZQ=="},
+    )
+    cog = Boost.__new__(Boost)
+    cog.flow_store = SimpleNamespace(get=lambda *args: flow, save=Mock())
+    posted = AsyncMock(return_value=True)
+    monkeypatch.setattr(boost_module, "post_approval_request", posted)
+    message = SimpleNamespace(edit=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=2),
+        message=message,
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    asyncio.run(cog.handle_confirm(interaction, 1, 2))
+
+    interaction.response.send_message.assert_awaited_once()
+    posted.assert_not_awaited()
+    message.edit.assert_awaited_once_with(view=None)
+
+
+def test_clear_on_a_retired_dashboard_removes_its_buttons():
+    flow = DmFlow(
+        1,
+        2,
+        "boost",
+        S.PENDING,
+        {"tier": 1, "role_name": "Lab", "role_image_b64": "cm9sZQ=="},
+    )
+    cog = Boost.__new__(Boost)
+    cog.bot = SimpleNamespace(get_guild=lambda guild_id: None)
+    cog.flow_store = SimpleNamespace(get=lambda *args: flow, save=lambda updated: None)
+    message = SimpleNamespace(edit=AsyncMock())
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=2),
+        message=message,
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    asyncio.run(cog.handle_clear(interaction, 1, 2))
+
+    interaction.response.send_message.assert_awaited_once()
+    assert "no longer active" in interaction.response.send_message.await_args.args[0].lower()
+    message.edit.assert_awaited_once_with(view=None)
+
+
+def test_clear_button_wipes_all_perks():
     flow = DmFlow(
         1,
         2,
         "boost",
         S.COLLECTING,
         {
-            "tier": 1,
+            "tier": 2,
             "role_name": "Lab",
             "role_image_b64": "cm9sZQ==",
+            "role_color_hex": "#12ABEF",
             "emoji_1_name": "kurisu",
             "emoji_1_b64": "ZW1vamk=",
+            "emoji_2_name": "mayuri",
+            "emoji_2_b64": "ZW1vamky",
         },
     )
-    monkeypatch.setattr(boost_module, "safe_dm", AsyncMock(return_value=False))
-    alert = AsyncMock(return_value=True)
-    monkeypatch.setattr(boost_module, "send_alert", alert)
+    cog = Boost.__new__(Boost)
+    cog.bot = SimpleNamespace(get_guild=lambda guild_id: SimpleNamespace(name="Steins;Gate"))
+    cog.flow_store = SimpleNamespace(get=lambda *args: flow, save=lambda updated: None)
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=2),
+        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()),
+    )
 
-    asyncio.run(cog._send_confirmation(SimpleNamespace(id=2), flow))
+    asyncio.run(cog.handle_clear(interaction, 1, 2))
 
-    assert flow.state == S.COLLECTING
-    alert.assert_awaited_once()
+    assert Boost._has_selection(flow) is False
+    for key in ("role_name", "role_image_b64", "role_color_hex", "emoji_1_name", "emoji_2_name"):
+        assert key not in flow.data
+    interaction.response.edit_message.assert_awaited_once()
+
+
+def test_apply_grant_with_only_an_emoji_skips_the_role():
+    cog = Boost.__new__(Boost)
+    cog._rollback_uncommitted_grant = AsyncMock()
+    guild = SimpleNamespace(
+        id=1,
+        roles=[],
+        emojis=[],
+        emoji_limit=5,
+        premium_tier=2,
+        create_role=AsyncMock(),
+        create_custom_emoji=AsyncMock(return_value=SimpleNamespace(id=99)),
+    )
+    member = SimpleNamespace(id=2, add_roles=AsyncMock())
+    flow = DmFlow(
+        1, 2, "boost", S.PENDING,
+        {"tier": 1, "emoji_1_name": "kurisu", "emoji_1_b64": "ZW1vamk="},
+    )
+
+    grant = asyncio.run(cog._apply_grant(guild, member, flow))
+
+    assert grant is not None
+    assert grant.role_id is None
+    assert grant.emoji_1_id == 99
+    guild.create_role.assert_not_awaited()
+    member.add_roles.assert_not_awaited()
+
+
+def test_apply_grant_with_only_a_role_skips_emojis():
+    cog = Boost.__new__(Boost)
+    cog._rollback_uncommitted_grant = AsyncMock()
+    role = SimpleNamespace(id=10, edit=AsyncMock())
+    guild = SimpleNamespace(
+        id=1,
+        roles=[],
+        emojis=[],
+        emoji_limit=5,
+        premium_tier=2,
+        create_role=AsyncMock(return_value=role),
+        create_custom_emoji=AsyncMock(),
+    )
+    member = SimpleNamespace(id=2, add_roles=AsyncMock())
+    flow = DmFlow(
+        1, 2, "boost", S.PENDING,
+        {"tier": 1, "role_name": "Lab", "role_image_b64": "cm9sZQ=="},
+    )
+
+    grant = asyncio.run(cog._apply_grant(guild, member, flow))
+
+    assert grant is not None
+    assert grant.role_id == 10
+    assert grant.emoji_1_id is None
+    guild.create_custom_emoji.assert_not_awaited()
+    role.edit.assert_awaited_once()
+    member.add_roles.assert_awaited_once_with(role, reason="Boost perk role assignment")
 
 
 def test_role_assignment_failure_rolls_back_new_grant():

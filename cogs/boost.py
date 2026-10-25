@@ -1400,7 +1400,7 @@ class Boost(commands.Cog):
         if "role_image_b64" in data and guild.premium_tier >= 2:
             try:
                 await role.edit(
-                    icon=base64.b64decode(data["role_image_b64"], validate=True),
+                    display_icon=base64.b64decode(data["role_image_b64"], validate=True),
                     reason="Boost perk role icon",
                 )
                 log(f"BOOST // ROLE ICON SET 『 {role.id} 』", level="debug", logger_name="boost")

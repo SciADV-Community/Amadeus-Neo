@@ -275,6 +275,10 @@ def test_role_assignment_failure_rolls_back_new_grant():
     grant = asyncio.run(cog._apply_grant(guild, member, flow))
 
     assert grant is None
+    role.edit.assert_awaited_once_with(
+        display_icon=b"role",
+        reason="Boost perk role icon",
+    )
     cog._rollback_uncommitted_grant.assert_awaited_once()
 
 

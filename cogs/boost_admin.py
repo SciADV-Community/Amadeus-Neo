@@ -90,41 +90,51 @@ class BoostAdmin(commands.Cog):
 
             embed.description = "✅ Your perks are active."
             embed.add_field(name="Tier", value=str(grant.tier), inline=True)
-            embed.add_field(name="Role", value=role.mention if role else "*(removed)*", inline=True)
+            if grant.role_id is None:
+                role_value = "Not requested"
+            else:
+                role_value = role.mention if role else "*(removed)*"
+            embed.add_field(name="Role", value=role_value, inline=True)
             if emoji_1:
                 embed.add_field(name="Emoji 1", value=str(emoji_1), inline=True)
             if emoji_2:
                 embed.add_field(name="Emoji 2", value=str(emoji_2), inline=True)
 
         elif flow is not None:
-            state_labels = {
-                S.COLLECTING:    "Waiting for role and emoji forms",
-                S.ROLE_NAME:     "Waiting for role name",
-                S.ROLE_IMAGE:    "Waiting for role icon image",
-                S.ROLE_COLOR:    "Waiting for role color",
-                S.EMOJI_1_NAME:  "Waiting for emoji 1 name",
-                S.EMOJI_1_IMAGE: "Waiting for emoji 1 image",
-                S.EMOJI_2_NAME:  "Waiting for emoji 2 name",
-                S.EMOJI_2_IMAGE: "Waiting for emoji 2 image",
-                S.CONFIRMATION:  "Ready to submit — check your DMs",
-                S.PENDING:       "Pending admin review",
-                S.PROCESSING:    "Approval is being processed",
-                S.DENIED:        "Previous request was not approved",
-            }
+            forced = bool(flow.data.get("forced"))
             if flow.state == S.DENIED:
-                if flow.data.get("forced"):
-                    embed.description = "Your previous request was not approved."
+                if forced:
+                    embed.description = (
+                        "Your previous request was not approved.\n\n"
+                        "An admin can start a new one with `/amadeus boost start`."
+                    )
                 else:
                     embed.description = (
                         "Your previous request was not approved.\n\n"
                         "I'll restart the setup in your DMs."
                     )
-            else:
+            elif flow.state in (S.PENDING, S.PROCESSING):
+                label = (
+                    "Pending admin review"
+                    if flow.state == S.PENDING
+                    else "Approval is being processed"
+                )
                 embed.description = (
                     "📝 You have an active request in progress.\n\n"
-                    f"**Current step:** {state_labels.get(flow.state, flow.state)}"
+                    f"**Current status:** {label}"
                 )
-            if flow.state not in (S.PENDING, S.PROCESSING, S.CONFIRMATION, S.DENIED):
+            elif forced:
+                # Admin-forced setups are admin-managed and never resumed here.
+                embed.description = (
+                    "📝 An admin started a boost setup for you, but it is no longer active.\n\n"
+                    "An admin can start a new one with `/amadeus boost start`."
+                )
+            else:
+                # COLLECTING, or a stale/legacy state the bot will refresh below.
+                embed.description = (
+                    "📝 You have an active request in progress.\n\n"
+                    "**Current status:** Waiting for perk forms"
+                )
                 embed.set_footer(text="Check your DMs to continue, or the bot will re-send the prompt.")
 
         elif is_active_booster(member):
@@ -137,26 +147,39 @@ class BoostAdmin(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        # If the user has an active mid-flow, re-send the current step prompt in DMs.
-        if flow is not None and flow.state == S.DENIED:
-            # Admin-forced requests remain admin-managed after denial. Do not
-            # send their stale DENIED dashboard: its buttons are intentionally
-            # inactive. An admin can start a fresh forced request if needed.
-            if not flow.data.get("forced"):
-                cog = self._boost_cog()
-                if cog is not None:
-                    restarted = await cog._reset_flow(
-                        guild.id,
-                        member.id,
-                        flow.data.get("tier", 1),
-                        forced=False,
-                    )
-                    if restarted is not None:
-                        await cog._send_prompt(interaction.user, restarted)
-        elif flow is not None and flow.state not in (S.PENDING, S.PROCESSING, S.CONFIRMATION):
-            cog = self._boost_cog()
-            if cog is not None:
-                await cog._send_prompt(interaction.user, flow)
+        if flow is None:
+            return
+
+        # Requests sitting with an admin are not resumable by the member.
+        if flow.state in (S.PENDING, S.PROCESSING):
+            return
+
+        # Admin-forced setups are admin-managed: don't resume or restart them.
+        # Drop the leftover state so a fresh `/amadeus boost start force:True`
+        # is required.
+        if flow.data.get("forced"):
+            self.flow_store.delete(guild.id, member.id, FLOW_TYPE)
+            return
+
+        cog = self._boost_cog()
+        if cog is None:
+            return
+
+        if flow.state == S.COLLECTING:
+            # The dashboard is live; just re-send it.
+            await cog._send_prompt(interaction.user, flow)
+            return
+
+        # A denied (self-service) or stale/legacy state: start the setup fresh so
+        # the member isn't left with a dashboard whose buttons do nothing.
+        restarted = await cog._reset_flow(
+            guild.id,
+            member.id,
+            flow.data.get("tier", 1),
+            forced=False,
+        )
+        if restarted is not None:
+            await cog._send_prompt(interaction.user, restarted)
 
     # ========================================================
     # /amadeus boost start
@@ -313,8 +336,12 @@ class BoostAdmin(commands.Cog):
             e1 = discord.utils.get(interaction.guild.emojis, id=grant.emoji_1_id) if grant.emoji_1_id else None
             e2 = discord.utils.get(interaction.guild.emojis, id=grant.emoji_2_id) if grant.emoji_2_id else None
 
+            if grant.role_id is None:
+                role_value = "Not requested"
+            else:
+                role_value = role.mention if role else f"ID {grant.role_id} *(missing)*"
             embed.add_field(name="Grant Tier", value=str(grant.tier), inline=True)
-            embed.add_field(name="Role", value=role.mention if role else f"ID {grant.role_id} *(missing)*", inline=True)
+            embed.add_field(name="Role", value=role_value, inline=True)
             embed.add_field(name="Emoji 1", value=str(e1) if e1 else "None", inline=True)
             embed.add_field(name="Emoji 2", value=str(e2) if e2 else "None", inline=True)
         else:

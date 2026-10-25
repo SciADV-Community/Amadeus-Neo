@@ -1,9 +1,9 @@
 # Module: boost
 
-Automates server boost perks. When a member boosts, the bot DMs them a private setup dashboard. Each reward has a button that opens a Discord modal for its text and file inputs. The completed request is sent to the admin channel for review and approval before anything is applied.
+Automates server boost perks. When a member boosts, the bot DMs them a private setup dashboard. Each reward has a button that opens a Discord modal for its text and file inputs, plus **Submit for Review** and **Clear** buttons. Every perk is optional: a member can request any subset of the perks their tier unlocks, or press **Submit for Review** whenever they are done. Unselected perks are not included in the request. Pressing **Submit for Review** sends the request to the admin channel and replies with a private confirmation. The request is reviewed and approved before anything is applied.
 
-**Tier 1 (1 boost):** custom role with icon + 1 suggested emoji  
-**Tier 2 (2 boosts):** custom role with icon and hex color + 2 suggested emojis
+**Tier 1 (1 boost):** custom role with icon and/or 1 suggested emoji  
+**Tier 2 (2 boosts):** custom role with icon and hex color and/or up to 2 suggested emojis
 
 ## Enable / Disable
 
@@ -17,27 +17,30 @@ Automates server boost perks. When a member boosts, the bot DMs them a private s
 - `/amadeus set-admin-channel` must be configured — approval requests are posted there. The bot needs **View Channel**, **Send Messages**, **Embed Links**, and **Attach Files** in that channel.
 - `/amadeus set-admin-role` must be configured — only this role can approve or deny requests.
 - The bot needs **Manage Roles** and **Manage Emojis and Stickers** permissions.
-- Role icons require the server to be at **Guild Boost Level 2**. A setup flow will not start until the server can apply every unlocked perk.
+- Role icons require the server to be at **Guild Boost Level 2**. This only matters if the member requests a role.
 - The bot role must sit above any custom boost roles it creates or assigns.
 
 ## How It Works
 
-1. Member boosts → bot DMs them the rewards they unlocked and a setup button for each item.
-   - **1 boost:** **Custom Role** and **Emoji 1** buttons.
-   - **2 boosts:** **Custom Role**, **Emoji 1**, and **Emoji 2** buttons.
-2. Each button opens a modal:
+1. Member boosts → bot DMs them the rewards they unlocked, a setup button for each item, and **Submit for Review** / **Clear** buttons.
+   - **1 boost:** **Custom Role**, **Emoji 1**, then **Submit for Review** and **Clear**.
+   - **2 boosts:** **Custom Role**, **Emoji 1**, **Emoji 2**, then **Submit for Review** and **Clear**.
+2. Each perk button opens a modal:
    - The role modal collects the name and icon, plus a six-digit hex color for two-boost members.
    - Each emoji modal collects its name and image in one form.
-3. Saving a modal silently changes its button to a green check mark; no extra success message is sent. Once every available item is complete, the member receives one names-only summary embed and clicks **Submit for Review** or **Start Over**. Images are not repeated in this member confirmation.
-4. Approval embed appears in the admin channel with full-width, vertically stacked image previews and **Approve** / **Deny** buttons.
-5. Admin clicks a button → optional comment modal → decision is processed. The image previews, attachments, and controls are removed only after the decision succeeds, leaving the request summary and decision record. Denied records also show the supplied reason, or **No reason provided** when the comment was left blank. The same reason is included in the member's denial DM.
-   - **Approved:** role created, icon and color applied, emojis uploaded, role assigned.
+3. Saving a modal silently changes its button to a green check mark; no extra success message is sent. **Clear** wipes every choice so the member can start over. Perks are optional, so pressing **Submit for Review** with anything left blank just skips those perks.
+4. Pressing **Submit for Review** sends the request to the admin channel and replies with a private confirmation. There's no second review screen.
+5. Only the requested perks are shown to admins. The approval embed appears in the admin channel with a **Requested Perks** field and full-width, vertically stacked image previews for the requested items, plus **Approve** / **Deny** buttons. Perks the member skipped are not displayed.
+6. Admin clicks a button → optional comment modal → decision is processed. The image previews, attachments, and controls are removed only after the decision succeeds, leaving the request summary and decision record. Denied records also show the supplied reason, or **No reason provided** when the comment was left blank. The same reason is included in the member's denial DM.
+   - **Approved:** only the requested resources are created, such as the role, icon, color, emojis, and role assignment.
    - **Denied:** member is DM'd and the request is parked until they type `boost` in DM or use `/boost status` in the server to restart later.
-6. If the member stops boosting, the custom role and emojis are removed automatically. Failed cleanup remains recorded and is retried instead of being forgotten.
+7. If the member stops boosting, any custom role and emojis they received are removed automatically. Failed cleanup remains recorded and is retried instead of being forgotten.
 
 DM sessions expire after **48 hours** of inactivity. During an active DM session, members can type `restart` to clear the forms or `cancel` to stop the setup. Members can use `/boost status` to receive a fresh setup dashboard, restart, or check their current state at any time. Setup buttons remain usable after a bot restart as long as the underlying session is still active.
 
-If a member sends `boost` to the bot in DM, the bot checks for an eligible existing boost request and restarts it. If there is no eligible request but the member is currently boosting, the bot starts a new self-service request. Admin-forced requests are excluded from self-service restarts through both DM and `/boost status`; after denial, an admin must run `/amadeus boost start <member> force: True` to create a fresh forced request.
+If a member sends `boost` to the bot in DM, the bot checks for an eligible existing boost request and restarts it. If there is no eligible request but the member is currently boosting, the bot starts a new self-service request.
+
+Admin-forced requests are managed by admins. The member can't resume or restart one with `/boost status` or the DM keywords, and the leftover flow is cleared, so an admin has to run `/amadeus boost start <member> force: True` again. A forced request that's already submitted and waiting on a decision is left alone. The member can still `cancel` a forced setup they don't want.
 
 ## Collection Rules
 
@@ -51,9 +54,9 @@ If a member sends `boost` to the bot in DM, the bot checks for an eligible exist
 
 Discord-uploaded image URLs are limited to Discord media hosts. External image URLs are rejected.
 
-## Emoji Slot Handling
+## Capacity Handling
 
-Before showing the setup dashboard, the bot verifies that there is room for the custom role and every unlocked emoji, and that role icons are available. If any requirement fails, no DM flow is created and the configured admin channel receives an alert naming the member so staff can contact them. Capacity is checked again when an approval is submitted in case the server filled up while the member completed the forms.
+Perks are optional, so capacity is checked against the perks a member actually requested rather than everything their tier unlocks. When an approval is submitted, the bot checks there's room for the requested role (role limit), a free slot for each requested emoji, and Boost Level 2 if a role icon was requested. An emoji-only request is never blocked by the role limit or the role-icon requirement. If a requirement fails, the request stays pending and the configured admin channel gets an alert so staff can free capacity and retry.
 
 ## Member Commands
 
